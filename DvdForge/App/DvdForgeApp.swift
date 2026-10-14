@@ -11,6 +11,9 @@ struct DvdForgeApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About dvdForge") { AboutPanel.show() }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open Disc Image or Folder…") { model.isImporting = true }
                     .keyboardShortcut("o")

@@ -55,7 +55,7 @@ targets:
       properties:
         CFBundleDisplayName: dvdForge
         LSApplicationCategoryType: public.app-category.utilities
-        NSHumanReadableCopyright: "Personal archival tool"
+        NSHumanReadableCopyright: "© 2026 bluepill.ca"
     entitlements:
       path: DvdForge/DvdForge.entitlements
       properties:
