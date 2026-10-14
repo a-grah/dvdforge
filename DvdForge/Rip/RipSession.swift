@@ -63,7 +63,7 @@ struct RipPlan: Sendable {
 
 /// Swift copies of DiscCore's read types, safe to pass between threads.
 struct ReadSnapshot: Sendable {
-    enum Pass: Sendable { case opening, sweep, scrape, verify, done }
+    enum Pass: Sendable { case opening, sweep, trim, scrape, verify, done }
     var pass: Pass = .opening
     var passDone: UInt64 = 0
     var passTotal: UInt64 = 0
@@ -109,6 +109,8 @@ struct TitleReadResult: Sendable {
     var readErrors: UInt64
     var verifyRan: Bool
     var resumed: Bool
+    var deviceLost: Bool
+    var stoppedRetrying: Bool
     var damage: [DamagedRange]
 }
 
@@ -140,6 +142,7 @@ final class ReadJobHandle: @unchecked Sendable {
     }
 
     func cancel() { dc.cancelReadJob(job) }
+    func stopRetrying() { dc.stopRetryingReadJob(job) }
 
     func progress() -> ReadSnapshot { ReadSnapshot(dc.readJobProgress(job)) }
 
@@ -234,6 +237,8 @@ final class RipSession {
     private(set) var isRunning = false
     /// Why the rip stopped early, when it wasn't the user (e.g. the disc was removed).
     var notice: String?
+    /// The drive vanished mid-read (reset or unplugged); the rip can resume.
+    private(set) var deviceLost = false
 
     var allFinished: Bool {
         entries.allSatisfy { if case .finished = $0.status { true } else { false } }
@@ -308,6 +313,11 @@ final class RipSession {
         currentRemux?.cancel()
     }
 
+    /// Finish the current title with whatever has been read so far.
+    func stopRetrying() {
+        currentRead?.stopRetrying()
+    }
+
     /// Runs the multi-pass read; nil if it failed or was cancelled.
     private func read(_ index: Int, plan: RipPlan) async -> TitleReadResult? {
         let job = ReadJobHandle(discPath: plan.discPath, title: entries[index].title.number,
@@ -331,6 +341,10 @@ final class RipSession {
         }
         if result.cancelled {
             entries[index].status = .cancelled
+            if result.deviceLost {
+                deviceLost = true
+                stopRequested = true
+            }
             return nil
         }
         return result
@@ -372,6 +386,7 @@ extension ReadSnapshot {
         pass = switch p.pass {
         case .opening: .opening
         case .sweep: .sweep
+        case .trim: .trim
         case .scrape: .scrape
         case .verify: .verify
         default: .done
@@ -405,6 +420,8 @@ extension TitleReadResult {
         readErrors = r.readErrors
         verifyRan = r.verifyRan
         resumed = r.resumed
+        deviceLost = r.deviceLost
+        stoppedRetrying = r.stoppedRetrying
         damage = r.damage.map {
             DamagedRange(firstSector: $0.firstSector, sectorCount: $0.sectorCount,
                          isUnstable: $0.state == .unstable,

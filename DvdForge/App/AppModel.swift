@@ -65,6 +65,14 @@ final class AppModel {
     @ObservationIgnored private var lookupTask: Task<Void, Never>?
     @ObservationIgnored private var autoRipAfterLookup = false
 
+    /// What to pick up again when a disc comes back after the drive reset mid-rip.
+    private struct ResumePlan {
+        var discID: String
+        var titles: Set<Int>
+        var tracks: [Int: TrackSelection]
+    }
+    @ObservationIgnored private var resumeWhenBack: ResumePlan?
+
     var isDriveSource: Bool {
         if case .drive = source { true } else { false }
     }
@@ -86,9 +94,9 @@ final class AppModel {
         if case let .drive(current) = source {
             guard let now = drives.discs.first(where: { $0.bsdName == current.bsdName }) else {
                 if isRipping, let rip {
-                    // Pulled out mid-rip: stop at once rather than retrying a missing disc.
-                    // Keep the panel up so the user sees what happened.
-                    rip.notice = "The disc was removed. Insert it again and rip to resume where it left off; sectors already read are kept."
+                    // Gone mid-rip: a drive reset (common on scratches) or the disc was
+                    // pulled. Stop now, keep the panel up, and resume when it's back.
+                    driveLost(during: rip)
                     rip.cancel()
                     source = nil
                 } else {
@@ -195,8 +203,15 @@ final class AppModel {
         }
     }
 
+    private func driveLost(during session: RipSession) {
+        guard let disc else { return }
+        resumeWhenBack = ResumePlan(discID: disc.discID, titles: selectedTitles, tracks: trackSelections)
+        session.notice = "The drive stopped responding (it can reset itself on a badly scratched area) or the disc was removed. Leave the disc in: when it comes back, dvdForge resumes where it left off and skips the area that caused the trouble. Everything read so far is kept."
+    }
+
     /// Batch flow: announce the result and, if asked, eject so the next disc can go in.
     private func ripFinished(_ session: RipSession) {
+        if rip === session, session.deviceLost, session.notice == nil { driveLost(during: session) }
         guard rip === session, session.notice == nil else { return }
         NSSound(named: session.allFinished ? "Glass" : "Basso")?.play()
         NSApp.requestUserAttention(.informationalRequest)
@@ -258,6 +273,15 @@ final class AppModel {
             trackSelections[title.number] = preferences.selection(for: title)
         }
         autoRipAfterLookup = isDriveSource && UserDefaults.standard.bool(forKey: SettingsKey.autoRip)
+        if let resume = resumeWhenBack {
+            resumeWhenBack = nil
+            if resume.discID == disc.discID, isDriveSource {
+                // Same disc back after a drive reset: same choices, carry on.
+                selectedTitles = resume.titles
+                trackSelections = resume.tracks
+                autoRipAfterLookup = true
+            }
+        }
         identify(disc)
     }
 

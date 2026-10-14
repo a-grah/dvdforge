@@ -23,6 +23,9 @@ public:
     virtual bool read(uint32_t lba, uint32_t count, uint8_t* buf) = 0;
     /// Best effort: run the drive at minimum speed while scraping damage.
     virtual void setSlow(bool) {}
+    /// True once the device itself is gone (drive reset or unplugged): further
+    /// failures say nothing about the disc.
+    virtual bool deviceGone() const { return false; }
 };
 
 /// Reads a VTS's title VOBs through libdvdread (and libdvdcss for CSS).
@@ -36,6 +39,7 @@ public:
     bool isOpen() const { return file_ != nullptr; }
     bool read(uint32_t lba, uint32_t count, uint8_t* buf) override;
     void setSlow(bool slow) override;
+    bool deviceGone() const override;
 
 private:
     dvd_file_s* file_ = nullptr;
@@ -48,9 +52,13 @@ class FaultySectorSource final : public SectorSource {
 public:
     FaultySectorSource(std::unique_ptr<SectorSource> inner, const FaultPlan& plan);
     bool read(uint32_t lba, uint32_t count, uint8_t* buf) override;
+    bool deviceGone() const override { return vanished_; }
 
 private:
     std::unique_ptr<SectorSource> inner_;
+    FaultPlan plan_;
+    std::set<uint32_t> slow_;
+    bool vanished_ = false;
     std::set<uint32_t> hardBad_;
     std::map<uint32_t, int> intermittentLeft_;
     std::set<uint32_t> flipPending_;

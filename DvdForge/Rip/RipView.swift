@@ -14,7 +14,7 @@ struct RipView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(session.entries) { entry in
-                    TitleRipView(entry: entry)
+                    TitleRipView(entry: entry, stopRetrying: { session.stopRetrying() })
                 }
             }
             .padding()
@@ -24,6 +24,7 @@ struct RipView: View {
 
 private struct TitleRipView: View {
     let entry: RipSession.Entry
+    var stopRetrying: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -35,7 +36,14 @@ private struct TitleRipView: View {
             }
             if case .reading = entry.status {
                 ProgressView(value: entry.progress.passFraction)
-                Text(detailLine).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                HStack {
+                    Text(detailLine).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                    Spacer()
+                    if entry.progress.pass == .trim || entry.progress.pass == .scrape {
+                        Button("Stop Retrying", action: stopRetrying)
+                            .help("Finish now. Sectors still unread are left blank (a brief glitch in the video) and listed in the report; everything already read is kept.")
+                    }
+                }
             }
             if case let .remuxing(fraction) = entry.status {
                 ProgressView(value: fraction)
@@ -78,9 +86,10 @@ private struct TitleRipView: View {
     private var passName: String {
         switch entry.progress.pass {
         case .opening: "Opening disc…"
-        case .sweep: "Pass 1: Reading"
-        case .scrape: "Pass 2: Retrying damaged sectors"
-        case .verify: "Pass 3: Verifying"
+        case .sweep: "Reading"
+        case .trim: "Narrowing down damaged areas"
+        case .scrape: "Retrying damaged areas"
+        case .verify: "Verifying"
         case .done: "Finishing…"
         }
     }
@@ -97,6 +106,7 @@ private struct TitleRipView: View {
             }
         }
         if p.readErrors > 0 { parts.append("\(p.readErrors) read errors") }
+        if p.pending > 0 { parts.append("\(p.pending.formatted()) sectors left to retry") }
         if p.repaired > 0 { parts.append("\(p.repaired) repaired") }
         return parts.joined(separator: " · ")
     }
@@ -188,6 +198,7 @@ private struct ResultSummary: View {
         var parts = ["\(result.totalSectors.formatted()) sectors"]
         parts.append(result.verifyRan ? "verified" : "not re-verified")
         if result.resumed { parts.append("resumed") }
+        if result.stoppedRetrying { parts.append("retries stopped early") }
         if result.readErrors > 0 { parts.append("\(result.readErrors) read errors along the way") }
         if result.repaired > 0 { parts.append("\(result.repaired) sectors repaired by verification") }
         if result.bad > 0 { parts.append("\(result.bad) unreadable (zero-filled)") }

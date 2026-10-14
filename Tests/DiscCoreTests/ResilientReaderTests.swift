@@ -35,10 +35,11 @@ import Testing
 
     @discardableResult
     static func read(_ disc: String, title: Int32, verify: dc.VerifyMode, faults: dc.FaultPlan? = nil,
-                     dir: URL = tempDir()) -> (dc.ReadResult, Data) {
+                     dir: URL = tempDir(), configure: (inout dc.ReadOptions) -> Void = { _ in }) -> (dc.ReadResult, Data) {
         var options = dc.ReadOptions()
         options.verify = verify
         options.retries = 4
+        configure(&options)
         let job = if let faults {
             dc.createReadJobWithFaults(std.string(disc), title, std.string(dir.path), options, faults)
         } else {
@@ -135,8 +136,105 @@ import Testing
         #expect(data == reference)
     }
 
+    @Test func largeDamagedAreaCostsFewReads() throws {
+        // A 3000-sector scratch. Reading every sector with retries would be ~12000
+        // failed reads, each of which can take a real drive many seconds.
+        try #require(totalSectors > 4100)
+        let faults = plan { for s in base + 1000 ..< base + 4000 { $0.hardBad.push_back(s) } }
+        let (result, data) = Self.read(fixture, title: mainTitle, verify: .off, faults: faults)
+        #expect(result.completed && result.bad == 3000, "bad = \(result.bad)")
+        #expect(result.readErrors < 300, "read errors = \(result.readErrors)")
+        var expected = reference
+        expected.replaceSubrange(1000 * 2048 ..< 4000 * 2048, with: Data(count: 3000 * 2048))
+        #expect(data == expected, "everything outside the scratch is recovered, nothing inside is invented")
+    }
+
+    @Test func stuckReadIsMarkedForLaterWhileStillStuck() async throws {
+        let dir = Self.tempDir()
+        var faults = dc.FaultPlan()
+        faults.slow.push_back(base + 100)
+        faults.slowDelayMs = 1500
+        var options = dc.ReadOptions()
+        options.verify = .off
+        options.slowReadSeconds = 0.2
+        let job = dc.createReadJobWithFaults(std.string(fixture), mainTitle, std.string(dir.path), options, faults)
+        defer { dc.destroyReadJob(job) }
+        let box = ResultBox()
+        let thread = Thread { box.result = dc.runReadJob(job) }
+        thread.start()
+
+        // While the read is stuck, the map on disk must already say "come back later",
+        // so a drive reset at this point wouldn't send a resume straight back here.
+        try await Task.sleep(for: .milliseconds(700))
+        let map = try String(contentsOf: dir.appending(path: "title-01.map"), encoding: .utf8)
+        #expect(map.split(separator: "\n").contains { $0.hasSuffix(" 2") }, "map: \(map)")
+
+        while box.result == nil { try await Task.sleep(for: .milliseconds(50)) }
+        let result = try #require(box.result)
+        #expect(result.completed && result.slowReads == 1 && result.bad == 0)
+        #expect(try Data(contentsOf: URL(filePath: String(result.stagingPath))) == reference)
+    }
+
+    @Test func driveLossStopsCleanlyAndResumes() {
+        let dir = Self.tempDir()
+        let (lost, _) = Self.read(fixture, title: mainTitle, verify: .automatic,
+                                  faults: plan { $0.vanishAtSector = Int64(base + 2000) }, dir: dir)
+        #expect(lost.deviceLost && lost.cancelled && !lost.completed)
+        #expect(lost.bad == 0, "a vanished drive says nothing about the disc; nothing may be marked bad")
+        #expect(lost.good > 1000 && lost.good <= 2000, "good = \(lost.good)")  // everything before the chunk where it vanished
+
+        let (resumed, data) = Self.read(fixture, title: mainTitle, verify: .automatic, dir: dir)
+        #expect(resumed.completed && resumed.resumed && resumed.bad == 0)
+        #expect(data == reference)
+    }
+
+    @Test func areaThatHangsTheDriveIsGivenUpQuickly() {
+        // Each failing read takes 600 ms here (minutes on a real drive). Retrying
+        // a 400-sector core block by block would hang 25+ times; instead one slow
+        // failure gives up on the whole core.
+        var faults = dc.FaultPlan()
+        for s in base + 1000 ..< base + 1400 { faults.hardBad.push_back(s) }
+        faults.failureDelayMs = 600
+        let clock = ContinuousClock()
+        let start = clock.now
+        let (result, _) = Self.read(fixture, title: mainTitle, verify: .off, faults: faults) {
+            $0.slowReadSeconds = 0.2
+        }
+        #expect(result.completed && result.bad == 400, "bad = \(result.bad)")
+        #expect(result.readErrors <= 10, "read errors = \(result.readErrors)")
+        #expect(clock.now - start < .seconds(10))
+    }
+
+    @Test func stopRetryingFinishesWithWhatWasRead() async throws {
+        let dir = Self.tempDir()
+        var faults = dc.FaultPlan()
+        for s in base + 1000 ..< base + 1400 { faults.hardBad.push_back(s) }
+        faults.failureDelayMs = 100  // failing reads are slow, like a real drive
+        var options = dc.ReadOptions()
+        options.verify = .automatic
+        let job = dc.createReadJobWithFaults(std.string(fixture), mainTitle, std.string(dir.path), options, faults)
+        defer { dc.destroyReadJob(job) }
+        let box = ResultBox()
+        let thread = Thread { box.result = dc.runReadJob(job) }
+        thread.start()
+
+        while dc.readJobProgress(job).pass != .scrape, box.result == nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        dc.stopRetryingReadJob(job)
+        while box.result == nil { try await Task.sleep(for: .milliseconds(20)) }
+        let result = try #require(box.result)
+        #expect(result.completed && result.stoppedRetrying && !result.verifyRan)
+        #expect(result.bad == 400)
+    }
+
     @Test func unknownTitleFails() {
         let (result, _) = Self.read(fixture, title: 99, verify: .off)
         #expect(!result.completed && String(result.error).contains("Title 99"))
     }
+}
+
+/// Carries a result out of a Thread in tests.
+final class ResultBox: @unchecked Sendable {
+    var result: dc.ReadResult?
 }

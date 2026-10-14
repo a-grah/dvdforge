@@ -133,8 +133,13 @@ enum class VerifyMode : uint8_t {
 
 struct ReadOptions {
     VerifyMode verify = VerifyMode::automatic;
-    int retries = 8;                ///< Per-sector attempts in pass 2 and pass 3 voting.
-    uint32_t chunkSectors = 512;    ///< Pass 1 read size (1 MiB).
+    int retries = 8;                ///< Max retry rounds over damage (stops early once a round recovers nothing).
+    uint32_t chunkSectors = 512;    ///< Pass 1 read size on healthy ground (1 MiB).
+    uint32_t clusterSectors = 32;   ///< Pass 1 read size just after an error (64 KiB).
+    /// A read taking longer than this is assumed to be stuck in a damaged area:
+    /// its sectors are marked for later and the map saved at once, so a drive
+    /// reset doesn't send the next resume straight back into it.
+    double slowReadSeconds = 10;
 };
 
 /// State of each sector of the title, in title (playback) order.
@@ -146,7 +151,10 @@ enum class SectorState : uint8_t {
     unstable = 4,    ///< Reads disagreed and no value won a majority.
 };
 
-enum class ReadPass : uint8_t { opening, sweep, scrape, verify, done };
+/// sweep: fast pass, skipping ahead past damage. trim: read inward from both
+/// edges of each damaged area. scrape: retry what's left, one ECC block (16
+/// sectors) at a time. verify: optional re-read and compare.
+enum class ReadPass : uint8_t { opening, sweep, trim, scrape, verify, done };
 
 struct ReadProgress {
     ReadPass pass = ReadPass::opening;
@@ -185,6 +193,9 @@ struct ReadResult {
     uint64_t sectorsReadFromDisc = 0;  ///< Less than the total when a rip resumed.
     bool verifyRan = false;
     bool resumed = false;
+    bool deviceLost = false;        ///< The drive disappeared mid-read (reset or unplugged); resumable.
+    bool stoppedRetrying = false;   ///< The user chose to finish before retries were exhausted.
+    uint64_t slowReads = 0;         ///< Reads that tripped the stuck-read watchdog.
     std::vector<DamagedRange> damage;
     Title title;                    ///< The title's structure, as read from this disc (for remuxing).
 };
@@ -196,6 +207,10 @@ struct FaultPlan {
     int intermittentFailures = 2;
     std::vector<uint32_t> flipped;        ///< First read returns corrupted data, silently.
     uint64_t cancelAfterSectors = 0;      ///< Cancel the job once this many sectors were read.
+    int failureDelayMs = 0;               ///< How long a failing read takes (drives retry internally).
+    std::vector<uint32_t> slow;           ///< Reads touching these take `slowDelayMs`, then succeed.
+    int slowDelayMs = 0;
+    int64_t vanishAtSector = -1;          ///< Reading this sector makes the device disappear.
 };
 
 /// A read of one title into a staging file. Opaque; drive it with the functions
@@ -216,6 +231,9 @@ ReadProgress readJobProgress(ReadJob* job);
 /// for drawing.
 std::vector<SectorState> readJobMapSummary(ReadJob* job, int buckets);
 void cancelReadJob(ReadJob* job);
+/// Finish now: no more retries; whatever is still unread is zero-filled and
+/// reported as damage, and the title goes on to be remuxed.
+void stopRetryingReadJob(ReadJob* job);
 void destroyReadJob(ReadJob* job);
 
 // MARK: - Lossless remux to Matroska

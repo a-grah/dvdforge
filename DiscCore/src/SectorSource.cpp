@@ -7,6 +7,9 @@
 #include <IOKit/storage/IODVDMediaBSDClient.h>
 #include <dvdread/dvd_reader.h>
 
+#include <chrono>
+#include <thread>
+
 namespace dc {
 
 // MARK: - DvdSectorSource
@@ -24,6 +27,11 @@ bool DvdSectorSource::read(uint32_t lba, uint32_t count, uint8_t* buf) {
     return DVDReadBlocks(file_, static_cast<int>(lba), count, buf) == static_cast<ssize_t>(count);
 }
 
+bool DvdSectorSource::deviceGone() const {
+    // Only meaningful for raw devices; image files and folders don't vanish.
+    return devicePath_.rfind("/dev/", 0) == 0 && access(devicePath_.c_str(), F_OK) != 0;
+}
+
 void DvdSectorSource::setSlow(bool slow) {
     if (slow == slow_ || devicePath_.rfind("/dev/", 0) != 0) return;
     // A second descriptor just for the ioctl; libdvdcss owns the reading one.
@@ -37,21 +45,33 @@ void DvdSectorSource::setSlow(bool slow) {
 // MARK: - FaultySectorSource
 
 FaultySectorSource::FaultySectorSource(std::unique_ptr<SectorSource> inner, const FaultPlan& plan)
-    : inner_(std::move(inner)), hardBad_(plan.hardBad.begin(), plan.hardBad.end()),
+    : inner_(std::move(inner)), plan_(plan), slow_(plan.slow.begin(), plan.slow.end()),
+      hardBad_(plan.hardBad.begin(), plan.hardBad.end()),
       flipPending_(plan.flipped.begin(), plan.flipped.end()) {
     for (uint32_t s : plan.intermittent) intermittentLeft_[s] = plan.intermittentFailures;
 }
 
 bool FaultySectorSource::read(uint32_t lba, uint32_t count, uint8_t* buf) {
-    bool failed = false;
+    using std::chrono::milliseconds;
+    if (vanished_) return false;
+    if (plan_.vanishAtSector >= lba && plan_.vanishAtSector < int64_t(lba) + count) {
+        vanished_ = true;
+        return false;
+    }
+    bool failed = false, slow = false;
     for (uint32_t s = lba; s < lba + count; ++s) {
+        if (slow_.count(s)) slow = true;
         if (hardBad_.count(s)) failed = true;
         if (auto it = intermittentLeft_.find(s); it != intermittentLeft_.end() && it->second > 0) {
             --it->second;
             failed = true;
         }
     }
-    if (failed) return false;
+    if (failed) {
+        if (plan_.failureDelayMs) std::this_thread::sleep_for(milliseconds(plan_.failureDelayMs));
+        return false;
+    }
+    if (slow) std::this_thread::sleep_for(milliseconds(plan_.slowDelayMs));
     if (!inner_->read(lba, count, buf)) return false;
     // Silent corruption: the first successful read of these sectors returns garbage.
     for (uint32_t s = lba; s < lba + count; ++s) {

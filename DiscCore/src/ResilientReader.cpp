@@ -1,15 +1,29 @@
 // Multi-pass, resumable title reader: the core of dvdForge's bitrot defense.
+// The strategy follows GNU ddrescue: get the healthy data off first, then
+// spend time on damage, smallest unknown areas last.
 //
-//   Pass 1 (sweep)  Read in large chunks. A chunk that fails is marked pending
-//                   and skipped, so healthy data comes off before marginal
-//                   areas are stressed.
-//   Pass 2 (scrape) Re-read pending sectors one at a time at minimum drive
-//                   speed, alternating direction, up to `retries` attempts.
-//                   Sectors that never read are zero-filled and marked bad.
-//                   Does nothing on a healthy disc.
-//   Pass 3 (verify) Optional. Re-read every good sector and compare with the
-//                   staging file; on mismatch, keep re-reading until two reads
-//                   agree. Catches drives that return wrong data without an error.
+//   sweep   Read in 1 MiB chunks. After an error, read 64 KiB clusters and
+//           jump ahead by a gap that doubles with each further error, marking
+//           what was jumped over as pending. Healthy discs only ever do this.
+//   trim    For each pending area, read inward from both edges (16 sectors at
+//           a time, then sector by sector) until the first failure, so only
+//           the damaged core is left.
+//   scrape  Retry the core one ECC block (16 sectors, the unit a DVD's error
+//           correction works on) at a time at minimum drive speed, in rounds,
+//           alternating direction; stop once a round recovers nothing.
+//           Whatever never reads is zero-filled and marked bad.
+//   verify  Optional. Re-read every good sector and compare with the staging
+//           file; on mismatch, keep re-reading until two reads agree. Catches
+//           drives that return wrong data without an error.
+//
+// A read stuck for longer than `slowReadSeconds` (drives retry internally for
+// minutes on scratches, sometimes until the USB bridge resets) is recorded by a
+// watchdog thread and the map saved at once: in the sweep its sectors become
+// pending (come back later); in trim/scrape they become bad (this area hangs
+// the drive). Either way a resume after a drive reset doesn't walk straight
+// back into it. A scrape read that hangs and then fails marks its whole
+// damaged core bad: the drive can't cope there, and every further block would
+// hang just the same.
 //
 // Data goes to a staging file (the title's cells concatenated in playback
 // order) and a sector map is saved alongside it, so a cancelled or crashed rip
@@ -32,6 +46,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -133,6 +148,7 @@ public:
           options_(options), faults_(std::move(faults)) {
         options_.retries = std::max(options_.retries, 1);
         options_.chunkSectors = std::clamp<uint32_t>(options_.chunkSectors, 1, 4096);
+        options_.clusterSectors = std::clamp<uint32_t>(options_.clusterSectors, 1, options_.chunkSectors);
     }
 
     ~ReadJob() {
@@ -180,13 +196,19 @@ public:
     }
 
     void cancel() { cancelled_ = true; }
+    void stopRetrying() { stopRetrying_ = true; }
 
 private:
     // Setup
     bool prepare(ReadResult& result);
     // Passes
     void sweep();
+    void trim();
     void scrape();
+    void watchdog();
+    void giveUpOnCore(uint64_t first, uint32_t n);
+    void markPending(uint64_t first, uint64_t end);  // untried sectors in [first, end)
+    bool readAndStore(uint64_t first, uint32_t count, uint8_t* buf);
     void verify();
     bool shouldVerify() const;
     // I/O
@@ -222,6 +244,16 @@ private:
     ReadProgress progress_;
 
     std::atomic<bool> cancelled_{false};
+    std::atomic<bool> stopRetrying_{false};
+    std::atomic<bool> deviceLost_{false};
+    // The read in flight, for the watchdog (guarded by mutex_).
+    int64_t inflightStart_ = -1;
+    uint32_t inflightCount_ = 0;
+    Clock::time_point inflightSince_;
+    bool inflightFlagged_ = false;
+    uint64_t slowReads_ = 0;
+    bool lastReadWasSlow_ = false;  // the previous read tripped the watchdog
+    std::atomic<bool> finished_{false};
     uint64_t errorsThisRun_ = 0;
     uint64_t sectorsRead_ = 0;
     uint64_t repaired_ = 0;
@@ -287,10 +319,9 @@ bool ReadJob::prepare(ReadResult& result) {
     {
         std::lock_guard lock(mutex_);
         map_ = saved ? std::move(*saved) : SectorMap(pos);
-        // Give previously unreadable sectors another chance (a cleaned disc, another drive).
+        // Bad sectors stay bad on resume: they are typically areas that hung the
+        // drive, and retrying them would only hang it again.
         hadDamageBefore_ = map_.count(SectorState::bad) || map_.count(SectorState::unstable);
-        for (uint64_t i = 0; i < map_.size(); ++i)
-            if (map_[i] == SectorState::bad) map_.set(i, SectorState::pending);
     }
     result.resumed = saved.has_value();
 
@@ -304,67 +335,208 @@ bool ReadJob::prepare(ReadResult& result) {
 
 // MARK: - Passes
 
+void ReadJob::markPending(uint64_t first, uint64_t end) {
+    std::lock_guard lock(mutex_);
+    for (uint64_t i = first; i < end && i < map_.size(); ++i)
+        if (map_[i] == SectorState::untried) map_.set(i, SectorState::pending);
+}
+
+bool ReadJob::readAndStore(uint64_t first, uint32_t count, uint8_t* buf) {
+    if (readSectors(first, count, buf) && writeSectors(first, count, buf)) {
+        setState(first, count, SectorState::good);
+        return true;
+    }
+    return false;
+}
+
 void ReadJob::sweep() {
     beginPass(ReadPass::sweep, map_.size());
     std::vector<uint8_t> buf(size_t(options_.chunkSectors) * kSectorSize);
+    const uint64_t maxSkip = std::max<uint64_t>(4096, map_.size() / 64);
+    uint64_t skip = 0;  // 0 = on healthy ground
     for (const Extent& e : extents_) {
-        for (uint64_t off = 0; off < e.count && !isCancelled(); off += options_.chunkSectors) {
-            uint64_t chunkStart = e.titleStart + off;
-            uint64_t chunkEnd = std::min<uint64_t>(chunkStart + options_.chunkSectors, e.titleStart + e.count);
-            // Read each run of untried sectors (on resume, good ones are skipped).
-            for (uint64_t i = chunkStart; i < chunkEnd;) {
-                if (map_[i] != SectorState::untried) { ++i; continue; }
-                uint64_t j = i;
-                while (j < chunkEnd && map_[j] == SectorState::untried) ++j;
-                auto n = static_cast<uint32_t>(j - i);
-                if (readSectors(i, n, buf.data()) && writeSectors(i, n, buf.data()))
-                    setState(i, n, SectorState::good);
-                else
-                    setState(i, n, SectorState::pending);
-                i = j;
+        uint64_t pos = e.titleStart, end = e.titleStart + e.count;
+        while (pos < end && !isCancelled()) {
+            if (map_[pos] != SectorState::untried) {  // done on an earlier run, or pending
+                uint64_t j = pos;
+                bool damage = false;
+                while (j < end && map_[j] != SectorState::untried) {
+                    damage |= map_[j] == SectorState::pending || map_[j] == SectorState::bad;
+                    ++j;
+                }
+                advance(j - pos);
+                pos = j;
+                // Resuming just past damage (e.g. after a drive reset): what follows is
+                // likely damaged too, so behave as after a fresh error: jump, then go small.
+                if (damage && pos < end) {
+                    skip = skip ? std::min(skip * 2, maxSkip) : options_.chunkSectors;
+                    uint64_t jumpEnd = std::min(end, pos + skip);
+                    markPending(pos, jumpEnd);
+                    advance(jumpEnd - pos);
+                    pos = jumpEnd;
+                }
+                continue;
             }
-            advance(chunkEnd - chunkStart);
+            uint64_t size = skip ? options_.clusterSectors : options_.chunkSectors;
+            uint64_t j = pos;
+            while (j < end && j - pos < size && map_[j] == SectorState::untried) ++j;
+            auto n = static_cast<uint32_t>(j - pos);
+            if (readAndStore(pos, n, buf.data())) {
+                skip = 0;
+            } else if (!isCancelled()) {
+                setState(pos, n, SectorState::pending);
+                // Jump past the damage; what we jump over is read later, from its edges.
+                skip = skip ? std::min(skip * 2, maxSkip) : options_.chunkSectors;
+                uint64_t jumpEnd = std::min(end, j + skip);
+                markPending(j, jumpEnd);
+                advance(jumpEnd - j);
+                j = jumpEnd;
+            }
+            advance(n);
+            pos = j;
             saveMapIfDue();
         }
     }
 }
 
-void ReadJob::scrape() {
-    std::vector<uint64_t> pending;
-    for (uint64_t i = 0; i < map_.size(); ++i)
-        if (map_[i] == SectorState::pending) pending.push_back(i);
-    beginPass(ReadPass::scrape, pending.size() * options_.retries);
-    if (pending.empty()) return;
+void ReadJob::trim() {
+    // Pending runs, each kept within one extent (reads can't cross cells).
+    std::vector<std::pair<uint64_t, uint64_t>> runs;
+    for (const Extent& e : extents_) {
+        uint64_t end = e.titleStart + e.count;
+        for (uint64_t i = e.titleStart; i < end;) {
+            if (map_[i] != SectorState::pending) { ++i; continue; }
+            uint64_t j = i;
+            while (j < end && map_[j] == SectorState::pending) ++j;
+            runs.emplace_back(i, j);
+            i = j;
+        }
+    }
+    uint64_t total = 0;
+    for (auto [a, b] : runs) total += b - a;
+    beginPass(ReadPass::trim, total);
+    if (runs.empty()) return;
 
+    constexpr uint32_t kBlock = 16;
+    std::vector<uint8_t> buf(kBlock * kSectorSize);
     source_->setSlow(true);
-    std::vector<uint8_t> buf(kSectorSize);
-    for (int attempt = 0; attempt < options_.retries && !pending.empty() && !isCancelled(); ++attempt) {
+    for (auto [a, b] : runs) {
+        if (isCancelled() || stopRetrying_) break;
+        // Forward from the leading edge, a block at a time. When a block fails,
+        // go sector by sector through it to find the exact edge; if every
+        // sector reads (a transient error), carry on with blocks.
+        // An edge next to a bad sector was found on an earlier run (before a drive reset).
+        bool leftKnown = a > 0 && map_[a - 1] == SectorState::bad;
+        bool rightKnown = b < map_.size() && map_[b] == SectorState::bad;
+        uint64_t lo = a;
+        bool edgeFound = leftKnown;
+        while (lo < b && !edgeFound && !isCancelled()) {
+            auto n = static_cast<uint32_t>(std::min<uint64_t>(kBlock, b - lo));
+            if (readAndStore(lo, n, buf.data())) { lo += n; continue; }
+            for (uint64_t blockEnd = lo + n; lo < blockEnd && !isCancelled(); ++lo)
+                if (!readAndStore(lo, 1, buf.data())) { edgeFound = true; break; }
+        }
+        // Backward from the trailing edge, the same way, down to just past `lo`
+        // (which failed, if an edge was found).
+        uint64_t hi = b, floor = (edgeFound && !leftKnown) ? lo + 1 : lo;
+        edgeFound = rightKnown;
+        while (hi > floor && !edgeFound && !isCancelled()) {
+            auto n = static_cast<uint32_t>(std::min<uint64_t>(kBlock, hi - floor));
+            if (readAndStore(hi - n, n, buf.data())) { hi -= n; continue; }
+            for (uint64_t blockStart = hi - n; hi > blockStart && !isCancelled(); --hi)
+                if (!readAndStore(hi - 1, 1, buf.data())) { edgeFound = true; break; }
+        }
+        advance(b - a);
+        saveMapIfDue();
+    }
+}
+
+void ReadJob::scrape() {
+    // The damaged cores left by trim, as ECC-block-sized groups.
+    constexpr uint64_t kBlock = 16;
+    std::vector<std::pair<uint64_t, uint32_t>> groups;
+    for (const Extent& e : extents_) {
+        uint64_t end = e.titleStart + e.count;
+        for (uint64_t i = e.titleStart; i < end;) {
+            if (map_[i] != SectorState::pending) { ++i; continue; }
+            uint64_t j = i;
+            while (j < end && j - i < kBlock && map_[j] == SectorState::pending) ++j;
+            groups.emplace_back(i, static_cast<uint32_t>(j - i));
+            i = j;
+        }
+    }
+    beginPass(ReadPass::scrape, groups.size() * options_.retries);
+
+    std::vector<uint8_t> buf(kBlock * kSectorSize);
+    source_->setSlow(true);
+    for (int round = 0; round < options_.retries && !groups.empty(); ++round) {
+        if (isCancelled() || stopRetrying_) break;
         // Alternate direction so a damaged area is approached from both sides.
-        if (attempt % 2 == 1) std::reverse(pending.begin(), pending.end());
-        std::vector<uint64_t> stillPending;
-        for (uint64_t s : pending) {
-            if (isCancelled()) { stillPending.push_back(s); continue; }
-            if (readSectors(s, 1, buf.data()) && writeSectors(s, 1, buf.data()))
-                setState(s, 1, SectorState::good);
-            else
-                stillPending.push_back(s);
+        if (round % 2 == 1) std::reverse(groups.begin(), groups.end());
+        std::vector<std::pair<uint64_t, uint32_t>> left;
+        for (auto [first, n] : groups) {
+            if (map_[first] != SectorState::pending) { advance(1); continue; }  // given up on
+            if (isCancelled() || stopRetrying_) {
+                left.emplace_back(first, n);
+            } else if (!readAndStore(first, n, buf.data())) {
+                if (lastReadWasSlow_) {
+                    giveUpOnCore(first, n);
+                } else {
+                    left.emplace_back(first, n);
+                }
+            }
             advance(1);
             saveMapIfDue();
         }
-        if (attempt % 2 == 1) std::reverse(stillPending.begin(), stillPending.end());
-        pending = std::move(stillPending);
+        std::erase_if(left, [&](auto g) { return map_[g.first] != SectorState::pending; });
+        if (round % 2 == 1) std::reverse(left.begin(), left.end());
+        bool recoveredAny = left.size() < groups.size();
+        groups = std::move(left);
+        if (!recoveredAny) break;  // the drive can't read these; more rounds won't help
     }
     source_->setSlow(false);
 
     if (isCancelled()) return;
-    // Out of retries: zero-fill so the demuxer resyncs at the next pack.
-    std::vector<uint8_t> zeros(kSectorSize, 0);
-    for (uint64_t s : pending) {
-        writeSectors(s, 1, zeros.data());
-        setState(s, 1, SectorState::bad);
+    // Out of retries (or told to stop): zero-fill so the demuxer resyncs at the next pack.
+    std::vector<uint8_t> zeros(kBlock * kSectorSize, 0);
+    for (uint64_t i = 0; i < map_.size(); ++i) {
+        if (map_[i] != SectorState::pending) continue;
+        writeSectors(i, 1, zeros.data());
+        setState(i, 1, SectorState::bad);
     }
     std::lock_guard lock(mutex_);
     progress_.passDone = progress_.passTotal;
+}
+
+/// Marks the block [first, first + n) and the contiguous pending area around it
+/// bad (and saves the map): the drive hung and failed there, so every other
+/// block of it would too. (The watchdog may already have marked the block
+/// itself bad, so widen from its edges rather than from its state.)
+void ReadJob::giveUpOnCore(uint64_t first, uint32_t n) {
+    uint64_t a = first, b = first + n;
+    while (a > 0 && map_[a - 1] == SectorState::pending) --a;
+    while (b < map_.size() && map_[b] == SectorState::pending) ++b;
+    setState(a, b - a, SectorState::bad);
+    saveMapIfDue(/*force=*/true);
+}
+
+void ReadJob::watchdog() {
+    using namespace std::chrono;
+    auto limit = duration_cast<Clock::duration>(duration<double>(options_.slowReadSeconds));
+    while (!finished_) {
+        std::this_thread::sleep_for(milliseconds(100));
+        std::lock_guard lock(mutex_);
+        if (inflightStart_ < 0 || inflightFlagged_ || Clock::now() - inflightSince_ < limit) continue;
+        // Stuck: assume damage, and make sure a resume after a drive reset skips it.
+        inflightFlagged_ = true;
+        ++slowReads_;
+        for (uint64_t i = inflightStart_; i < uint64_t(inflightStart_) + inflightCount_; ++i) {
+            if (map_[i] == SectorState::untried) map_.set(i, SectorState::pending);
+            else if (map_[i] == SectorState::pending) map_.set(i, SectorState::bad);
+        }
+        fsync(fd_);
+        map_.save(mapPath_, titleNumber_);
+    }
 }
 
 bool ReadJob::shouldVerify() const {
@@ -456,7 +628,26 @@ bool ReadJob::readSectors(uint64_t titleSector, uint32_t count, uint8_t* buf) {
     const Extent& e = extentFor(titleSector);
     auto lba = static_cast<uint32_t>(e.lba + (titleSector - e.titleStart));
     auto start = Clock::now();
+    {
+        std::lock_guard lock(mutex_);
+        inflightStart_ = static_cast<int64_t>(titleSector);
+        inflightCount_ = count;
+        inflightSince_ = start;
+        inflightFlagged_ = false;
+    }
     bool ok = source_->read(lba, count, buf);
+    {
+        std::lock_guard lock(mutex_);
+        inflightStart_ = -1;
+        lastReadWasSlow_ = inflightFlagged_;
+    }
+    if (!ok && source_->deviceGone()) {
+        // The drive itself went away; failures from here on mean nothing. Stop
+        // (keeping everything read so far) and let the app resume when it's back.
+        deviceLost_ = true;
+        cancel();
+        return false;
+    }
     if (ok) {
         sectorsRead_ += count;
         noteRead(count, Clock::now() - start);
@@ -541,12 +732,16 @@ ReadResult ReadJob::run() {
     ReadResult result;
     if (!prepare(result)) return result;
 
+    std::thread dog([this] { watchdog(); });
     sweep();
+    if (!isCancelled()) trim();
     if (!isCancelled()) scrape();
-    if (!isCancelled() && shouldVerify()) {
+    if (!isCancelled() && !stopRetrying_ && shouldVerify()) {
         result.verifyRan = true;
         verify();
     }
+    finished_ = true;
+    dog.join();
     saveMapIfDue(/*force=*/true);
 
     {
@@ -565,6 +760,9 @@ ReadResult ReadJob::run() {
     result.sectorsReadFromDisc = sectorsRead_;
     result.damage = damage();
     result.title = title_;
+    result.deviceLost = deviceLost_;
+    result.stoppedRetrying = stopRetrying_ && !result.cancelled;
+    result.slowReads = slowReads_;
     return result;
 }
 
@@ -584,6 +782,7 @@ ReadResult runReadJob(ReadJob* job) { return job->run(); }
 ReadProgress readJobProgress(ReadJob* job) { return job->progress(); }
 std::vector<SectorState> readJobMapSummary(ReadJob* job, int buckets) { return job->summary(buckets); }
 void cancelReadJob(ReadJob* job) { job->cancel(); }
+void stopRetryingReadJob(ReadJob* job) { job->stopRetrying(); }
 void destroyReadJob(ReadJob* job) { delete job; }
 
 } // namespace dc
