@@ -185,7 +185,8 @@ bool fillChapters(Title& title, ifo_handle_t* vts, int ttn, std::vector<std::str
             title.cells.push_back({.firstSector = cell.first_sector,
                                    .lastSector = cell.last_sector,
                                    .durationTicks = ticks,
-                                   .chapter = chapter.number});
+                                   .chapter = chapter.number,
+                                   .clockRestarts = cell.stc_discontinuity != 0});
             title.sectorCount += cell.last_sector - cell.first_sector + 1ULL;
             chapter.durationTicks += ticks;
         }

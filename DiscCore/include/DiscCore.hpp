@@ -71,6 +71,8 @@ struct CellRange {
     uint32_t lastSector = 0;
     uint64_t durationTicks = 0;
     int chapter = 0;           ///< Chapter this cell belongs to.
+    /// The MPEG clock restarts at this cell (the IFO's STC discontinuity flag).
+    bool clockRestarts = false;
 };
 
 enum class AspectRatio : uint8_t { fourByThree, sixteenByNine, unknown };
@@ -246,6 +248,7 @@ struct RemuxResult {
     std::string outputPath;
     uint64_t durationTicks = 0;     ///< Of the output video track.
     int timestampDiscontinuities = 0;  ///< Cell boundaries where timestamps were re-based.
+    int demuxSegments = 0;          ///< Clock segments (from the IFO) demuxed separately.
     std::vector<std::string> warnings;
 };
 

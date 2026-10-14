@@ -8,6 +8,11 @@
 // discontinuity"). Packets are buffered at the start of each cell until its
 // first video timestamp is known; if that timestamp doesn't continue the
 // output timeline, the whole cell is shifted so playback stays continuous.
+//
+// The staging file is demuxed in segments split where the IFO says the clock
+// restarts. libavformat's GENPTS look-ahead waits for a later, larger DTS in
+// the same stream; across a restart none ever comes, and it would buffer the
+// rest of the title in memory.
 
 #include "DiscCore.hpp"
 
@@ -21,6 +26,9 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -136,7 +144,16 @@ private:
         PacketPtr packet;
     };
 
-    bool openInput();
+    struct Segment {
+        int64_t start;  // byte range in the staging file
+        int64_t end;
+    };
+
+    bool prepare();
+    bool openSegment(size_t index, bool analyse);
+    void closeSegment();
+    static int readSegment(void* opaque, uint8_t* buf, int size);
+    static int64_t seekSegment(void* opaque, int64_t offset, int whence);
     bool createOutput();
     bool addVideo();
     bool addAudio(const AudioTrack& a, bool isDefault);
@@ -144,6 +161,7 @@ private:
     void addChapters();
     void addTags();
     bool remux();
+    bool remuxSegment(AVPacket* pkt);
 
     Track* trackFor(int inputIndex);
     int cellForPosition(int64_t pos) const;
@@ -165,6 +183,12 @@ private:
     std::atomic<bool> cancelled_{false};
 
     AVFormatContext* in_ = nullptr;
+    AVIOContext* inIO_ = nullptr;
+    int stagingFd_ = -1;
+    int64_t stagingSize_ = 0;
+    std::vector<Segment> segments_;
+    Segment segment_{0, 0};
+    int64_t segmentPos_ = 0;  // read position within segment_
     AVFormatContext* out_ = nullptr;
     std::string tempPath_;
     std::deque<Track> tracks_;            // deque: stable addresses
@@ -191,26 +215,89 @@ bool RemuxJob::fail(const std::string& message, int code) {
     return false;
 }
 
-bool RemuxJob::openInput() {
-    AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "probesize", "67108864", 0);
-    av_dict_set(&opts, "analyzeduration", "30000000", 0);
-    const AVInputFormat* mpegps = av_find_input_format("mpeg");
-    int ret = avformat_open_input(&in_, req_.stagingPath.c_str(), mpegps, &opts);
-    av_dict_free(&opts);
-    if (ret < 0) return fail("Could not open the staging file", ret);
-    // MPEG-PS only stamps some frames; Matroska needs a PTS on every block.
-    // GENPTS fills the gaps by parsing ahead (B-frame reordering included).
-    in_->flags |= AVFMT_FLAG_GENPTS;
-    if ((ret = avformat_find_stream_info(in_, nullptr)) < 0) return fail("Could not analyse the title", ret);
+bool RemuxJob::prepare() {
+    stagingFd_ = open(req_.stagingPath.c_str(), O_RDONLY);
+    if (stagingFd_ < 0) return fail("Could not open the staging file " + req_.stagingPath);
+    stagingSize_ = lseek(stagingFd_, 0, SEEK_END);
 
     uint64_t bytes = 0;
     for (const CellRange& c : req_.title.cells) {
+        if (c.clockRestarts && bytes > 0) {
+            segments_.back().end = static_cast<int64_t>(bytes);
+            segments_.push_back({static_cast<int64_t>(bytes), 0});
+        }
+        if (segments_.empty()) segments_.push_back({0, 0});
         bytes += (uint64_t(c.lastSector) - c.firstSector + 1) * kSectorSize;
         cellEnds_.push_back(static_cast<int64_t>(bytes));
     }
+    if (segments_.empty()) segments_.push_back({0, 0});
+    segments_.back().end = std::max<int64_t>(static_cast<int64_t>(bytes), stagingSize_);
+    result_.demuxSegments = static_cast<int>(segments_.size());
     frameTicks_ = req_.title.pal ? 3600 : 3003;
     return true;
+}
+
+int RemuxJob::readSegment(void* opaque, uint8_t* buf, int size) {
+    auto* self = static_cast<RemuxJob*>(opaque);
+    int64_t left = self->segment_.end - self->segment_.start - self->segmentPos_;
+    if (left <= 0) return AVERROR_EOF;
+    ssize_t n = pread(self->stagingFd_, buf, static_cast<size_t>(std::min<int64_t>(size, left)),
+                      self->segment_.start + self->segmentPos_);
+    if (n <= 0) return n == 0 ? AVERROR_EOF : AVERROR(errno);
+    self->segmentPos_ += n;
+    return static_cast<int>(n);
+}
+
+int64_t RemuxJob::seekSegment(void* opaque, int64_t offset, int whence) {
+    auto* self = static_cast<RemuxJob*>(opaque);
+    int64_t length = self->segment_.end - self->segment_.start;
+    switch (whence & ~AVSEEK_FORCE) {
+    case AVSEEK_SIZE: return length;
+    case SEEK_SET: break;
+    case SEEK_CUR: offset += self->segmentPos_; break;
+    case SEEK_END: offset += length; break;
+    default: return AVERROR(EINVAL);
+    }
+    if (offset < 0 || offset > length) return AVERROR(EINVAL);
+    self->segmentPos_ = offset;
+    return offset;
+}
+
+/// Opens a fresh demuxer over one clock segment. Only the first segment is
+/// analysed (for codec parameters); later ones discover streams as they read.
+bool RemuxJob::openSegment(size_t index, bool analyse) {
+    closeSegment();
+    segment_ = segments_[index];
+    segmentPos_ = 0;
+    constexpr int kBufferSize = 1 << 16;
+    auto* buffer = static_cast<uint8_t*>(av_malloc(kBufferSize));
+    inIO_ = avio_alloc_context(buffer, kBufferSize, 0, this, &RemuxJob::readSegment, nullptr, &RemuxJob::seekSegment);
+    in_ = avformat_alloc_context();
+    if (!inIO_ || !in_) return fail("Out of memory opening the staging file.");
+    in_->pb = inIO_;
+    in_->flags |= AVFMT_FLAG_CUSTOM_IO;
+    // MPEG-PS only stamps some frames; Matroska needs a PTS on every block.
+    // GENPTS fills the gaps by parsing ahead (B-frame reordering included).
+    in_->flags |= AVFMT_FLAG_GENPTS;
+
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "probesize", "67108864", 0);
+    av_dict_set(&opts, "analyzeduration", "30000000", 0);
+    int ret = avformat_open_input(&in_, nullptr, av_find_input_format("mpeg"), &opts);
+    av_dict_free(&opts);
+    if (ret < 0) return fail("Could not open the staging file", ret);
+    if (analyse && (ret = avformat_find_stream_info(in_, nullptr)) < 0)
+        return fail("Could not analyse the title", ret);
+    byInputIndex_.clear();
+    return true;
+}
+
+void RemuxJob::closeSegment() {
+    avformat_close_input(&in_);  // frees in_ but not our custom AVIOContext
+    if (inIO_) {
+        av_freep(&inIO_->buffer);
+        avio_context_free(&inIO_);
+    }
 }
 
 bool RemuxJob::createOutput() {
@@ -399,11 +486,14 @@ RemuxJob::Track* RemuxJob::trackFor(int inputIndex) {
         }
     }
     byInputIndex_[inputIndex] = match;
+    // Let the demuxer skip streams we don't keep instead of parsing them for nothing.
+    if (!match) st->discard = AVDISCARD_ALL;
     return match;
 }
 
 int RemuxJob::cellForPosition(int64_t pos) const {
     if (pos < 0) return currentCell_;
+    pos += segment_.start;  // packet positions are relative to the open segment
     auto it = std::upper_bound(cellEnds_.begin(), cellEnds_.end(), pos);
     return static_cast<int>(std::min<size_t>(it - cellEnds_.begin(), cellEnds_.size() - 1));
 }
@@ -594,16 +684,31 @@ bool RemuxJob::finishLpcm(Track& t) {
 }
 
 bool RemuxJob::remux() {
-    int64_t fileSize = avio_size(in_->pb);
     PacketPtr pkt(av_packet_alloc());
+    for (size_t index = 0; index < segments_.size(); ++index) {
+        if (index > 0 && !openSegment(index, false)) return false;
+        if (!remuxSegment(pkt.get())) return false;
+    }
+    if (!flushPending()) return false;
+    for (Track& t : tracks_) {
+        if (t.held && !write(t, t.held.get())) return false;
+        t.held.reset();
+        if (t.dec && !finishLpcm(t)) return false;
+    }
+    int ret = av_write_trailer(out_);
+    return ret >= 0 || fail("Could not finish the MKV", ret);
+}
+
+bool RemuxJob::remuxSegment(AVPacket* pkt) {
     int ret;
-    while ((ret = av_read_frame(in_, pkt.get())) >= 0) {
+    while ((ret = av_read_frame(in_, pkt)) >= 0) {
         if (cancelled_) return false;
-        if (fileSize > 0 && pkt->pos >= 0) fraction_ = double(pkt->pos) / double(fileSize);
+        if (stagingSize_ > 0 && pkt->pos >= 0)
+            fraction_ = double(segment_.start + pkt->pos) / double(stagingSize_);
 
         Track* t = trackFor(pkt->stream_index);
         if (!t) {
-            av_packet_unref(pkt.get());
+            av_packet_unref(pkt);
             continue;
         }
         int cell = cellForPosition(pkt->pos);
@@ -614,14 +719,14 @@ bool RemuxJob::remux() {
         }
 
         if (!awaitingVideo_) {
-            if (!emit(*t, pkt.get())) return false;
-            av_packet_unref(pkt.get());
+            if (!emit(*t, pkt)) return false;
+            av_packet_unref(pkt);
             continue;
         }
-        bool anchors = t->isVideo && packetTime(pkt.get()) != AV_NOPTS_VALUE;
-        int64_t anchorTs = packetTime(pkt.get());
-        pending_.push_back({t, PacketPtr(av_packet_clone(pkt.get()))});
-        av_packet_unref(pkt.get());
+        bool anchors = t->isVideo && packetTime(pkt) != AV_NOPTS_VALUE;
+        int64_t anchorTs = packetTime(pkt);
+        pending_.push_back({t, PacketPtr(av_packet_clone(pkt))});
+        av_packet_unref(pkt);
         if (anchors) {
             resolveCellOffset(anchorTs);
             if (!flushPending()) return false;
@@ -630,18 +735,11 @@ bool RemuxJob::remux() {
         }
     }
     if (ret != AVERROR_EOF) result_.warnings.push_back("Stopped reading early: " + averror(ret));
-    if (!flushPending()) return false;
-    for (Track& t : tracks_) {
-        if (t.held && !write(t, t.held.get())) return false;
-        t.held.reset();
-        if (t.dec && !finishLpcm(t)) return false;
-    }
-    if ((ret = av_write_trailer(out_)) < 0) return fail("Could not finish the MKV", ret);
     return true;
 }
 
 RemuxResult RemuxJob::run() {
-    bool ok = openInput() && createOutput() && remux();
+    bool ok = prepare() && openSegment(0, true) && createOutput() && remux();
     if (out_ && out_->pb) avio_closep(&out_->pb);
 
     result_.cancelled = cancelled_;
@@ -687,7 +785,9 @@ void RemuxJob::cleanup() {
         avformat_free_context(out_);
         out_ = nullptr;
     }
-    avformat_close_input(&in_);
+    closeSegment();
+    if (stagingFd_ >= 0) close(stagingFd_);
+    stagingFd_ = -1;
 }
 
 // MARK: - Public API

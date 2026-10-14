@@ -105,6 +105,7 @@ import Testing
         #expect(tags["DVDFORGE_DISC_ID"] as? String == "0123456789abcdef0123456789abcdef")
         #expect(tags["title"] as? String == "Fixture")
         #expect(r.remux.timestampDiscontinuities == 0)
+        #expect(r.remux.demuxSegments == 1)
     }
 
     @Test func outputDecodesWithoutErrors() throws {
@@ -147,6 +148,8 @@ import Testing
     @Test func clockRestartBetweenCellsIsRebased() throws {
         let r = try rip(title: 3, audio: [0], subtitles: [])
         #expect(r.remux.timestampDiscontinuities >= 1)
+        // The IFO flags the restart, so each side gets its own demuxer.
+        #expect(r.remux.demuxSegments == 2)
         let format = try #require(try probe(r.mkv)["format"] as? [String: Any])
         let duration = Double(format["duration"] as? String ?? "") ?? 0
         #expect(abs(duration - 12) < 0.5, "duration \(duration)")
