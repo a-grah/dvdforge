@@ -12,6 +12,12 @@ struct RipReport: Codable, Sendable, Hashable, Identifiable {
         var drive: String?
     }
 
+    struct MovieRecord: Codable, Sendable, Hashable {
+        var tmdbID: Int
+        var title: String
+        var year: Int?
+    }
+
     struct TitleRecord: Codable, Sendable, Hashable {
         var number: Int
         var durationSeconds: Double
@@ -52,6 +58,7 @@ struct RipReport: Codable, Sendable, Hashable, Identifiable {
     var date: Date
     var software: String
     var disc: DiscRecord
+    var movie: MovieRecord?
     var title: TitleRecord
     var read: ReadRecord
     var output: OutputRecord
@@ -60,7 +67,7 @@ struct RipReport: Codable, Sendable, Hashable, Identifiable {
     var reportURL: URL?
 
     enum CodingKeys: String, CodingKey {
-        case formatVersion, date, software, disc, title, read, output
+        case formatVersion, date, software, disc, movie, title, read, output
     }
 
     var id: String { reportURL?.path ?? "\(disc.id)-\(title.number)-\(date.timeIntervalSince1970)" }
@@ -123,6 +130,7 @@ extension RipReport {
             software: Self.softwareDescription,
             disc: DiscRecord(label: plan.movieTitle, id: plan.discID, source: plan.discPath,
                              drive: plan.driveModel.isEmpty ? nil : plan.driveModel),
+            movie: plan.movie.map { MovieRecord(tmdbID: $0.id, title: $0.title, year: $0.year) },
             title: TitleRecord(number: title.number, durationSeconds: title.duration.seconds,
                                chapters: title.chapters.count, sectors: read.totalSectors,
                                isMainFeature: title.isMainFeature),

@@ -233,6 +233,7 @@ struct RemuxRequest {
     // Provenance written as Matroska tags.
     std::string discId;
     std::string driveModel;
+    std::string tmdb;               ///< "movie/<id>" when identified; written as the TMDB tag.
     uint64_t badSectors = 0;
     uint64_t unstableSectors = 0;
 };

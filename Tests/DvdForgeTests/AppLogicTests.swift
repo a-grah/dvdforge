@@ -70,6 +70,7 @@ private func title(audio: [(String, TrackPurpose)], subtitles: [String]) -> Disc
         let report = RipReport(
             date: Date(timeIntervalSince1970: 1_790_000_000), software: "test",
             disc: .init(label: "Amadeus", id: "858c0d27", source: "/dev/rdisk4", drive: "TSSTcorp"),
+            movie: .init(tmdbID: 279, title: "Amadeus", year: 1984),
             title: .init(number: 2, durationSeconds: 10822.1, chapters: 46, sectors: 3_774_956, isMainFeature: true),
             read: .init(verifyMode: "auto", verifyRan: true, retriesPerSector: 8, resumed: false, readErrors: 3,
                         unreadableSectors: 2, unstableSectors: 0, repairedSectors: 1,

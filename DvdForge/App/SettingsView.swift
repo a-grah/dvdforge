@@ -44,6 +44,7 @@ struct SettingsView: View {
             } header: {
                 Text("Languages")
             }
+            OnlineLookupSettings()
             Section {
                 Toggle("Rip the main feature as soon as a disc is inserted", isOn: $autoRip)
                 Toggle("Eject the disc when the rip finishes", isOn: $ejectWhenDone)

@@ -38,10 +38,22 @@ final class AppModel {
         var subtitles: Set<Int>
     }
 
+    /// What the disc is, according to TMDb.
+    enum Identification: Equatable {
+        case notConfigured
+        case looking
+        case identified(MovieMatch)
+        case choose([MovieMatch], query: String)
+        case unmatched(query: String)
+        case failed(String)
+    }
+
     let drives = DriveMonitor()
     private(set) var source: Source?
     private(set) var state: State = .idle
     private(set) var rip: RipSession?
+    private(set) var identification: Identification = .notConfigured
+    var isChoosingMovie = false
 
     var selectedTitles: Set<Int> = []
     var isImporting = false
@@ -50,6 +62,8 @@ final class AppModel {
     var trackSelections: [Int: TrackSelection] = [:]
 
     @ObservationIgnored private var scanTask: Task<Void, Never>?
+    @ObservationIgnored private var lookupTask: Task<Void, Never>?
+    @ObservationIgnored private var autoRipAfterLookup = false
 
     var isDriveSource: Bool {
         if case .drive = source { true } else { false }
@@ -92,6 +106,9 @@ final class AppModel {
 
     func open(_ source: Source) {
         scanTask?.cancel()
+        lookupTask?.cancel()
+        identification = .notConfigured
+        autoRipAfterLookup = false
         endRip()
         self.source = source
         state = .scanning
@@ -120,6 +137,9 @@ final class AppModel {
 
     func close() {
         scanTask?.cancel()
+        lookupTask?.cancel()
+        identification = .notConfigured
+        autoRipAfterLookup = false
         endRip()
         source = nil
         state = .idle
@@ -158,14 +178,15 @@ final class AppModel {
         let plan = RipPlan(
             discPath: source.path,
             discID: disc.discID,
-            movieTitle: disc.volumeLabel.isEmpty ? "Untitled Disc" : disc.volumeLabel.prettifiedVolumeLabel,
+            movieTitle: movieName(for: disc),
             driveModel: driveModel,
             outputFolder: outputFolder,
             verify: VerifyRead(rawValue: defaults.string(forKey: SettingsKey.verifyRead) ?? "") ?? .auto,
             retries: defaults.object(forKey: SettingsKey.retries) as? Int ?? 8,
             keepStaging: defaults.bool(forKey: SettingsKey.keepStaging),
             tracks: trackSelections,
-            defaultAudio: defaultAudio)
+            defaultAudio: defaultAudio,
+            movie: identifiedMovie)
 
         rip = session
         Task {
@@ -236,9 +257,72 @@ final class AppModel {
         for title in disc.titles {
             trackSelections[title.number] = preferences.selection(for: title)
         }
-        if isDriveSource, UserDefaults.standard.bool(forKey: SettingsKey.autoRip) {
-            startRip()
+        autoRipAfterLookup = isDriveSource && UserDefaults.standard.bool(forKey: SettingsKey.autoRip)
+        identify(disc)
+    }
+
+    // MARK: - Identification
+
+    var identifiedMovie: MovieMatch? {
+        if case let .identified(movie) = identification { movie } else { nil }
+    }
+
+    /// "Amadeus (1984)" once identified, otherwise the tidied volume label.
+    func movieName(for disc: Disc) -> String {
+        identifiedMovie?.displayName
+            ?? (disc.volumeLabel.isEmpty ? "Untitled Disc" : disc.volumeLabel.prettifiedVolumeLabel)
+    }
+
+    /// Looks the disc up on TMDb (or recalls an earlier answer), then starts a
+    /// pending auto-rip so batch rips get the right name.
+    func identify(_ disc: Disc) {
+        lookupTask?.cancel()
+        if let known = IdentificationStore.lookup(disc.discID) {
+            identification = .identified(known)
+            lookupFinished()
+            return
         }
+        guard let client = TMDbClient.configured else {
+            identification = .notConfigured
+            lookupFinished()
+            return
+        }
+        identification = .looking
+        let minutes = disc.mainFeature.map { $0.duration.seconds / 60 }
+        lookupTask = Task {
+            do {
+                let (query, decision) = try await TitleLookup.identify(label: disc.volumeLabel, minutes: minutes,
+                                                                       client: client)
+                guard !Task.isCancelled else { return }
+                switch decision {
+                case let .confident(movie):
+                    identification = .identified(movie)
+                    IdentificationStore.remember(movie, for: disc.discID)
+                case let .ambiguous(candidates):
+                    identification = .choose(candidates, query: query.text)
+                case .nothing:
+                    identification = .unmatched(query: query.text)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                identification = .failed(error.localizedDescription)
+            }
+            lookupFinished()
+        }
+    }
+
+    /// The user's pick from the chooser; nil means "use the disc label".
+    func choose(_ movie: MovieMatch?) {
+        guard let disc else { return }
+        IdentificationStore.remember(movie, for: disc.discID)
+        identification = movie.map { .identified($0) } ?? .unmatched(query: LabelCleaner.query(for: disc.volumeLabel).text)
+        isChoosingMovie = false
+    }
+
+    private func lookupFinished() {
+        guard autoRipAfterLookup else { return }
+        autoRipAfterLookup = false
+        startRip()
     }
 
     // MARK: - Selection bindings

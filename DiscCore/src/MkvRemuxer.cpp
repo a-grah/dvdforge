@@ -465,6 +465,7 @@ void RemuxJob::addTags() {
     std::time_t now = std::time(nullptr);
     std::strftime(date, sizeof date, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
     tag("title", req_.movieTitle);
+    tag("TMDB", req_.tmdb);  // the tag Plex, Kodi and Jellyfin read for exact matching
     tag("DVDFORGE_DISC_ID", req_.discId);
     tag("DVDFORGE_SOURCE_TITLE", std::to_string(req_.title.number));
     tag("DVDFORGE_RIP_DATE", date);

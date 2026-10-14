@@ -30,6 +30,9 @@ struct DiscView: View {
             .frame(minHeight: 160)
         }
         .onAppear { focusedTitle = disc.mainFeature?.id ?? disc.titles.first?.id }
+        .sheet(isPresented: Bindable(model).isChoosingMovie) {
+            MovieChooser(disc: disc)
+        }
     }
 
     private var header: some View {
@@ -43,6 +46,7 @@ struct DiscView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                IdentityRow()
             }
             Spacer()
             if !disc.warnings.isEmpty {

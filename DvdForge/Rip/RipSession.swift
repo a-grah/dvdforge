@@ -57,6 +57,8 @@ struct RipPlan: Sendable {
     var tracks: [Int: AppModel.TrackSelection]
     /// Per title, the audio track to flag as default (absent: the first kept).
     var defaultAudio: [Int: Int] = [:]
+    /// The movie, when identified online.
+    var movie: MovieMatch?
 }
 
 /// Swift copies of DiscCore's read types, safe to pass between threads.
@@ -175,6 +177,7 @@ final class RemuxJobHandle: @unchecked Sendable {
         request.movieTitle = std.string(plan.movieTitle)
         request.discId = std.string(plan.discID)
         request.driveModel = std.string(plan.driveModel)
+        if let movie = plan.movie { request.tmdb = std.string("movie/\(movie.id)") }
         request.badSectors = read.bad
         request.unstableSectors = read.unstable
         job = dc.createRemuxJob(request)
