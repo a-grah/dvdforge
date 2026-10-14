@@ -90,6 +90,17 @@ Scripts/release.sh
 
 `DVDFORGE_SIGN_IDENTITY` and `DVDFORGE_NOTARY_PROFILE` override the defaults.
 
+GitHub Actions does the same on a tag. Bump `MARKETING_VERSION` (and
+`CURRENT_PROJECT_VERSION`) in `project.yml`, commit, then:
+
+```sh
+git tag v1.1 && git push origin main v1.1
+```
+
+`.github/workflows/release.yml` builds, signs, notarises and publishes the
+release. It needs the secrets listed at the top of that file. `ci.yml` builds
+and runs the tests on every push and pull request.
+
 ### Tests
 
 ```sh

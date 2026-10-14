@@ -1,0 +1,87 @@
+# Pushing a tag like v1.1 builds, signs, notarises and publishes a release.
+# The tag must match MARKETING_VERSION in project.yml.
+#
+# Repository secrets:
+#   DEVELOPER_ID_P12           base64 of the "Developer ID Application" certificate
+#                              and private key, exported from Keychain Access as .p12
+#   DEVELOPER_ID_P12_PASSWORD  the password chosen when exporting it
+#   NOTARY_KEY                 base64 of an App Store Connect API key (.p8)
+#   NOTARY_KEY_ID              that key's ID
+#   NOTARY_ISSUER_ID           the issuer ID shown above the key list
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Check the tag matches the version
+        run: |
+          version=$(sed -n 's/^ *MARKETING_VERSION: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' project.yml | head -1)
+          [[ "$GITHUB_REF_NAME" == "v$version" ]] || {
+            echo "::error::tag $GITHUB_REF_NAME doesn't match MARKETING_VERSION $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install tools
+        run: brew install xcodegen meson ninja pkg-config
+
+      - name: Dependency cache key
+        id: deps
+        run: echo "key=deps-$(git submodule status | shasum | cut -c1-16)-${{ hashFiles('Scripts/build-deps.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vendored libraries
+        uses: actions/cache@v6
+        with:
+          path: Vendor/build/DiscDeps.xcframework
+          key: ${{ steps.deps.outputs.key }}
+
+      - name: Import signing certificate
+        env:
+          P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Build, sign and notarise
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          DVDFORGE_NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          DVDFORGE_NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          export DVDFORGE_NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          echo "$NOTARY_KEY" | base64 --decode > "$DVDFORGE_NOTARY_KEY"
+          Scripts/release.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/dvdForge-$VERSION.zip" "dist/dvdForge-$VERSION.zip.sha256" \
+            --title "dvdForge $VERSION" --generate-notes
+
+      - name: Clean up
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8"

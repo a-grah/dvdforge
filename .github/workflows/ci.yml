@@ -1,0 +1,35 @@
+# Builds and runs the tests on every push to main and every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install tools
+        run: brew install xcodegen meson ninja pkg-config ffmpeg dvdauthor
+
+      - name: Dependency cache key
+        id: deps
+        run: echo "key=deps-$(git submodule status | shasum | cut -c1-16)-${{ hashFiles('Scripts/build-deps.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vendored libraries
+        uses: actions/cache@v6
+        with:
+          path: Vendor/build/DiscDeps.xcframework
+          key: ${{ steps.deps.outputs.key }}
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build and test
+        run: xcodebuild -project dvdForge.xcodeproj -scheme dvdForge -destination 'platform=macOS' test

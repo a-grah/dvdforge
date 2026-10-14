@@ -12,6 +12,9 @@
 #   DVDFORGE_SIGN_IDENTITY   codesign identity (default: the first "Developer ID
 #                            Application" identity in your keychain)
 #   DVDFORGE_NOTARY_PROFILE  notarytool keychain profile (default: dvdforge-notary)
+#   DVDFORGE_NOTARY_KEY      path to an App Store Connect API key (.p8); with
+#   DVDFORGE_NOTARY_KEY_ID   its key ID and
+#   DVDFORGE_NOTARY_ISSUER   issuer ID, used instead of the profile (as in CI)
 #
 # Output: dist/dvdForge-<version>.zip containing the stapled app, plus its SHA-256.
 set -euo pipefail
@@ -22,7 +25,11 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 IDENTITY="${DVDFORGE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
   sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
-PROFILE="${DVDFORGE_NOTARY_PROFILE:-dvdforge-notary}"
+if [[ -n "${DVDFORGE_NOTARY_KEY:-}" ]]; then
+  NOTARY_AUTH=(--key "$DVDFORGE_NOTARY_KEY" --key-id "$DVDFORGE_NOTARY_KEY_ID" --issuer "$DVDFORGE_NOTARY_ISSUER")
+else
+  NOTARY_AUTH=(--keychain-profile "${DVDFORGE_NOTARY_PROFILE:-dvdforge-notary}")
+fi
 [[ -n "$IDENTITY" ]] || { echo "error: no Developer ID Application identity found"; exit 1; }
 
 VERSION=$(sed -n 's/^ *MARKETING_VERSION: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' project.yml | head -1)
@@ -51,7 +58,7 @@ echo "==> Notarising (this usually takes a few minutes)"
 mkdir -p "$DIST"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 
