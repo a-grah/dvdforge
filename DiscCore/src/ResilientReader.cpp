@@ -239,7 +239,7 @@ bool ReadJob::prepare(ReadResult& result) {
         result.error = "Could not open " + discPath_ + " as a DVD.";
         return false;
     }
-    DiscInfo info = readDiscInfo(dvd_.get(), log_);
+    DiscInfo info = readDiscInfo(dvd_.get(), discPath_, log_);
     if (!info.ok) {
         result.error = info.error;
         return false;

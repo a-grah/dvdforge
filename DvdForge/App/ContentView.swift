@@ -46,7 +46,8 @@ struct ContentView: View {
         .task { model.start() }
         .onChange(of: model.drives.discs) { model.drivesChanged() }
         .fileImporter(isPresented: $model.isImporting,
-                      allowedContentTypes: [UTType(filenameExtension: "iso") ?? .diskImage, .folder]) { result in
+                      allowedContentTypes: [UTType(filenameExtension: "iso") ?? .diskImage,
+                                            UTType(filenameExtension: "dvdmedia") ?? .package, .folder]) { result in
             if case let .success(url) = result { model.open(.file(url)) }
         }
         .dropDestination(for: URL.self) { urls, _ in

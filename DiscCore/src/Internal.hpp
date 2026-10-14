@@ -25,7 +25,8 @@ using DvdPtr = std::unique_ptr<dvd_reader_t, DvdCloser>;
 /// DVDOpen with logging routed into `sink`.
 DvdPtr openDvd(const std::string& path, LogSink& sink);
 
-/// readDiscInfo on an already open disc; log lines are appended to `sink`.
-DiscInfo readDiscInfo(dvd_reader_t* dvd, LogSink& sink);
+/// readDiscInfo on an already open disc opened from `path`; log lines are
+/// appended to `sink`.
+DiscInfo readDiscInfo(dvd_reader_t* dvd, const std::string& path, LogSink& sink);
 
 } // namespace dc

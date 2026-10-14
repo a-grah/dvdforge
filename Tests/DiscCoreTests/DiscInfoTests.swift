@@ -65,9 +65,32 @@ import Testing
         #expect(abs(seconds(t.durationTicks) - 12) < 0.5)
     }
 
+    @Test func folderCopyIsLabelledFromItsName() {
+        let bundle = URL(filePath: Self.fixture).deletingLastPathComponent().appending(path: "Folder.dvdmedia")
+        let folder = dc.readDiscInfo(std.string(bundle.path))
+        #expect(folder.ok && String(folder.volumeLabel) == "Folder" && folder.titles.count == 3)
+        let videoTS = dc.readDiscInfo(std.string(bundle.appending(path: "VIDEO_TS").path))
+        #expect(videoTS.ok && String(videoTS.volumeLabel) == "Folder")
+        // Same IFOs, so the same disc ID as the ISO.
+        #expect(String(folder.discId) == String(info.discId))
+    }
+
     @Test func reportsUnopenablePath() {
         let bad = dc.readDiscInfo(std.string("/nonexistent.iso"))
         #expect(!bad.ok && !String(bad.error).isEmpty)
+    }
+}
+
+@Suite struct DvdTimeTests {
+    @Test func ntscTimecodeSecondsLast1001Milliseconds() {
+        // 3:00:11, frame 9, NTSC (0xC0 rate bits): (10811 * 30 + 9) frames of 1/29.97 s.
+        let ticks = dc.dvdTimeToTicks(0x03, 0x00, 0x11, 0xC0 | 0x09)
+        #expect(ticks == (10811 * 30 + 9) * 3003)
+        #expect(abs(Double(ticks) / 90000 - 10822.1) < 0.05)  // what the Amadeus main title really lasts
+    }
+
+    @Test func palIsExact() {
+        #expect(dc.dvdTimeToTicks(0x01, 0x00, 0x00, 0x40 | 0x24) == (3600 * 25 + 24) * 3600)
     }
 }
 

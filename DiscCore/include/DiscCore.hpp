@@ -31,6 +31,12 @@ bool canOpenDisc(const std::string& path);
 /// directly for timestamp re-basing when muxing.
 inline constexpr uint64_t kTicksPerSecond = 90'000;
 
+/// Converts an IFO playback time (BCD hour/minute/second plus the frame byte,
+/// whose top two bits give the rate) to 90 kHz ticks. The fields are timecode:
+/// for NTSC they count 30 frames per "second" although video runs at 29.97,
+/// so a timecode second lasts 1.001 real seconds.
+uint64_t dvdTimeToTicks(uint8_t hour, uint8_t minute, uint8_t second, uint8_t frameByte);
+
 enum class AudioCodec : uint8_t { ac3, dts, lpcm, mpeg, unknown };
 
 enum class TrackPurpose : uint8_t { normal, visuallyImpaired, commentary, other };

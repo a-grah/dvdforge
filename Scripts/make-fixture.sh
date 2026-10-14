@@ -17,7 +17,9 @@ ROOT="${0:A:h:h}"
 OUT="$ROOT/Tests/Fixtures"
 ISO="$OUT/basic.iso"
 
-if [[ -f "$ISO" && "${1:-}" != "--force" ]]; then
+BUNDLE="$OUT/Folder.dvdmedia"
+
+if [[ -f "$ISO" && -d "$BUNDLE" && "${1:-}" != "--force" ]]; then
   echo "basic.iso is up to date (use --force to rebuild)"
   exit 0
 fi
@@ -94,4 +96,9 @@ VIDEO_FORMAT=NTSC dvdauthor -o dvd -x dvd.xml >/dev/null 2>&1
 # libdvdread locates files through UDF, so the image needs a UDF 1.02 filesystem.
 rm -f "$ISO"
 hdiutil makehybrid -quiet -udf -udf-version 1.02 -iso -default-volume-name DVDFORGE_FIXTURE -o "$ISO" dvd
-echo "==> Wrote $ISO ($(du -h "$ISO" | cut -f1))"
+# The same disc as a folder copy, the way RipIt-style .dvdmedia bundles store it.
+rm -rf "$BUNDLE"
+mkdir -p "$BUNDLE"
+cp -R dvd/VIDEO_TS "$BUNDLE/"
+
+echo "==> Wrote $ISO ($(du -h "$ISO" | cut -f1)) and $BUNDLE"

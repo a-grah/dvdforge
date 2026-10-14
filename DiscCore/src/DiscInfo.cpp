@@ -1,7 +1,9 @@
 #include "Internal.hpp"
 
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <memory>
 
@@ -31,13 +33,8 @@ using IfoPtr = std::unique_ptr<ifo_handle_t, IfoCloser>;
 
 int fromBcd(uint8_t v) { return (v >> 4) * 10 + (v & 0x0f); }
 
-/// dvd_time_t → 90 kHz ticks. The two high bits of frame_u give the frame rate
-/// (01 = 25 fps, 11 = 29.97 fps); the rest is a BCD frame count.
 uint64_t ticksFromDvdTime(const dvd_time_t& t) {
-    uint64_t seconds = fromBcd(t.hour) * 3600ULL + fromBcd(t.minute) * 60ULL + fromBcd(t.second);
-    uint64_t frames = fromBcd(t.frame_u & 0x3f);
-    uint64_t ticksPerFrame = ((t.frame_u >> 6) == 1) ? 3600 : 3003;
-    return seconds * kTicksPerSecond + frames * ticksPerFrame;
+    return dvdTimeToTicks(t.hour, t.minute, t.second, t.frame_u);
 }
 
 std::string language(uint16_t code) {
@@ -63,6 +60,19 @@ TrackPurpose subtitlePurpose(uint8_t ext) {
     if (ext >= 13 && ext <= 15) return TrackPurpose::commentary;
     if (ext <= 7) return TrackPurpose::normal;
     return TrackPurpose::other;
+}
+
+/// A label for discs that have no volume name to read: folder copies
+/// ("AMADEUS.dvdmedia", ".../MOVIE/VIDEO_TS") and unlabelled images.
+std::string labelFromPath(const std::string& path) {
+    namespace fs = std::filesystem;
+    fs::path p = fs::path(path).lexically_normal();
+    if (!p.has_filename()) p = p.parent_path();
+    std::string name = p.filename().string();
+    std::string upper = name;
+    for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (upper == "VIDEO_TS") name = p.parent_path().filename().string();
+    return fs::path(name).stem().string();
 }
 
 std::string hex(const unsigned char* bytes, size_t n) {
@@ -190,6 +200,14 @@ bool fillChapters(Title& title, ifo_handle_t* vts, int ttn, std::vector<std::str
 
 // MARK: - Public API
 
+uint64_t dvdTimeToTicks(uint8_t hour, uint8_t minute, uint8_t second, uint8_t frameByte) {
+    // Top two bits: 01 = 25 fps (PAL), 11 = 29.97 fps (NTSC, counted as 30 per timecode second).
+    bool pal = (frameByte >> 6) == 1;
+    uint64_t seconds = fromBcd(hour) * 3600ULL + fromBcd(minute) * 60ULL + fromBcd(second);
+    uint64_t frames = seconds * (pal ? 25 : 30) + fromBcd(frameByte & 0x3f);
+    return frames * (pal ? 3600 : 3003);
+}
+
 void classifyTitles(TitleList& titles) {
     std::map<std::vector<std::pair<uint32_t, uint32_t>>, int> seen;  // cell signature → first title
     Title* main = nullptr;
@@ -219,18 +237,23 @@ DiscInfo readDiscInfo(const std::string& path) {
         info.log = std::move(sink.lines);
         return info;
     }
-    return readDiscInfo(dvd.get(), sink);
+    return readDiscInfo(dvd.get(), path, sink);
 }
 
-DiscInfo readDiscInfo(dvd_reader_t* dvd, LogSink& sink) {
+DiscInfo readDiscInfo(dvd_reader_t* dvd, const std::string& path, LogSink& sink) {
     DiscInfo info;
 
-    char volid[33] = {};
-    unsigned char volsetid[128] = {};
-    if (DVDUDFVolumeInfo(dvd, volid, sizeof volid, volsetid, sizeof volsetid) != 0)
-        DVDISOVolumeInfo(dvd, volid, sizeof volid, volsetid, sizeof volsetid);
-    info.volumeLabel = volid;
-    while (!info.volumeLabel.empty() && info.volumeLabel.back() == ' ') info.volumeLabel.pop_back();
+    // Folder copies have no volume descriptors (asking makes libdvdread seek to garbage).
+    std::error_code ec;
+    if (!std::filesystem::is_directory(path, ec)) {
+        char volid[33] = {};
+        unsigned char volsetid[128] = {};
+        if (DVDUDFVolumeInfo(dvd, volid, sizeof volid, volsetid, sizeof volsetid) != 0)
+            DVDISOVolumeInfo(dvd, volid, sizeof volid, volsetid, sizeof volsetid);
+        info.volumeLabel = volid;
+        while (!info.volumeLabel.empty() && info.volumeLabel.back() == ' ') info.volumeLabel.pop_back();
+    }
+    if (info.volumeLabel.empty()) info.volumeLabel = labelFromPath(path);
 
     unsigned char discId[16];
     if (DVDDiscID(dvd, discId) == 0) info.discId = hex(discId, sizeof discId);
