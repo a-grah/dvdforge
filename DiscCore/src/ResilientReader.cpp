@@ -353,23 +353,30 @@ void ReadJob::sweep() {
     beginPass(ReadPass::sweep, map_.size());
     std::vector<uint8_t> buf(size_t(options_.chunkSectors) * kSectorSize);
     const uint64_t maxSkip = std::max<uint64_t>(4096, map_.size() / 64);
-    uint64_t skip = 0;  // 0 = on healthy ground
+    uint64_t skip = 0;        // 0 = on healthy ground
+    uint64_t cleanSince = 0;  // sectors read without error since the last one
+    // Damage is rarely a single point: only go back to big reads once this much
+    // has come off cleanly after an error.
+    const uint64_t healthyAgain = options_.chunkSectors * 2;
     for (const Extent& e : extents_) {
         uint64_t pos = e.titleStart, end = e.titleStart + e.count;
         while (pos < end && !isCancelled()) {
             if (map_[pos] != SectorState::untried) {  // done on an earlier run, or pending
                 uint64_t j = pos;
-                bool damage = false;
+                uint64_t damaged = 0;
                 while (j < end && map_[j] != SectorState::untried) {
-                    damage |= map_[j] == SectorState::pending || map_[j] == SectorState::bad;
+                    damaged += map_[j] == SectorState::pending || map_[j] == SectorState::bad;
                     ++j;
                 }
                 advance(j - pos);
                 pos = j;
                 // Resuming just past damage (e.g. after a drive reset): what follows is
-                // likely damaged too, so behave as after a fresh error: jump, then go small.
-                if (damage && pos < end) {
-                    skip = skip ? std::min(skip * 2, maxSkip) : options_.chunkSectors;
+                // likely damaged too, so behave as after a fresh error: jump, then go
+                // small. The more damage already found here, the further the jump.
+                if (damaged && pos < end) {
+                    cleanSince = 0;
+                    uint64_t floor = std::min<uint64_t>(maxSkip, std::max<uint64_t>(options_.chunkSectors, damaged * 2));
+                    skip = skip ? std::min(std::max(skip * 2, floor), maxSkip) : floor;
                     uint64_t jumpEnd = std::min(end, pos + skip);
                     markPending(pos, jumpEnd);
                     advance(jumpEnd - pos);
@@ -382,8 +389,10 @@ void ReadJob::sweep() {
             while (j < end && j - pos < size && map_[j] == SectorState::untried) ++j;
             auto n = static_cast<uint32_t>(j - pos);
             if (readAndStore(pos, n, buf.data())) {
-                skip = 0;
+                cleanSince += n;
+                if (cleanSince >= healthyAgain) skip = 0;
             } else if (!isCancelled()) {
+                cleanSince = 0;
                 setState(pos, n, SectorState::pending);
                 // Jump past the damage; what we jump over is read later, from its edges.
                 skip = skip ? std::min(skip * 2, maxSkip) : options_.chunkSectors;
