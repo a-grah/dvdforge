@@ -114,6 +114,12 @@ struct TitleReadResult: Sendable {
     var damage: [DamagedRange]
 }
 
+/// Moves a job pointer to the queue that destroys it.
+private struct UncheckedPointer: @unchecked Sendable {
+    let pointer: OpaquePointer
+    init(_ pointer: OpaquePointer) { self.pointer = pointer }
+}
+
 /// Owns a DiscCore ReadJob. DiscCore guarantees progress/summary/cancel are
 /// thread-safe while `run` executes on another thread.
 final class ReadJobHandle: @unchecked Sendable {
@@ -126,7 +132,12 @@ final class ReadJobHandle: @unchecked Sendable {
         job = dc.createReadJob(std.string(discPath), Int32(title), std.string(stagingDir.path), options)
     }
 
-    deinit { dc.destroyReadJob(job) }
+    deinit {
+        // Closing the job closes the DVD device, which can block for minutes if
+        // the drive is hung on a scratch; never do that on the main thread.
+        let job = UncheckedPointer(job)
+        DispatchQueue.global(qos: .utility).async { dc.destroyReadJob(job.pointer) }
+    }
 
     /// Blocks until the read finishes; runs on its own thread so it never ties
     /// up Swift's cooperative pool for the (possibly hours-long) read.
@@ -186,7 +197,10 @@ final class RemuxJobHandle: @unchecked Sendable {
         job = dc.createRemuxJob(request)
     }
 
-    deinit { dc.destroyRemuxJob(job) }
+    deinit {
+        let job = UncheckedPointer(job)
+        DispatchQueue.global(qos: .utility).async { dc.destroyRemuxJob(job.pointer) }
+    }
 
     func run() async -> TitleRemuxResult {
         await withCheckedContinuation { continuation in

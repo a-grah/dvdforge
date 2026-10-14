@@ -67,7 +67,12 @@ public:
     SectorState operator[](uint64_t i) const { return states_[i]; }
     uint64_t count(SectorState s) const { return counts_[static_cast<int>(s)]; }
 
+    /// Bumped on every change, so readers can cache derived views.
+    uint64_t version() const { return version_; }
+
     void set(uint64_t i, SectorState s) {
+        if (states_[i] == s) return;
+        ++version_;
         --counts_[static_cast<int>(states_[i])];
         ++counts_[static_cast<int>(s)];
         states_[i] = s;
@@ -120,6 +125,7 @@ public:
 private:
     std::vector<SectorState> states_;
     uint64_t counts_[5] = {};
+    uint64_t version_ = 0;
 };
 
 /// One cell, placed in both the title's linear sector space and the VTS.
@@ -170,6 +176,8 @@ public:
 
     std::vector<SectorState> summary(int buckets) {
         std::lock_guard lock(mutex_);
+        // The UI asks several times a second; rescan only when the map changed.
+        if (buckets == summaryBuckets_ && map_.version() == summaryVersion_) return summary_;
         std::vector<SectorState> out;
         if (buckets <= 0 || map_.size() == 0) return out;
         out.reserve(buckets);
@@ -192,6 +200,9 @@ public:
                 if (rank(map_[i]) > rank(worst)) worst = map_[i];
             out.push_back(worst);
         }
+        summary_ = out;
+        summaryBuckets_ = buckets;
+        summaryVersion_ = map_.version();
         return out;
     }
 
@@ -242,6 +253,9 @@ private:
     std::mutex mutex_;  // guards map_ and progress_ against progress()/summary()
     SectorMap map_;
     ReadProgress progress_;
+    std::vector<SectorState> summary_;  // cached summary(), see summaryVersion_
+    int summaryBuckets_ = 0;
+    uint64_t summaryVersion_ = UINT64_MAX;
 
     std::atomic<bool> cancelled_{false};
     std::atomic<bool> stopRetrying_{false};
