@@ -59,14 +59,14 @@ Made by [bluepill.ca](https://bluepill.ca).
 brew install xcodegen meson ninja pkg-config
 git clone --recursive <this repository> dvdForge
 cd dvdForge
-xcodegen generate          # creates dvdForge.xcodeproj from project.yml
+xcodegen generate          # builds the libraries, then creates dvdForge.xcodeproj
 open dvdForge.xcodeproj    # or: xcodebuild -scheme dvdForge build
 ```
 
-The first build runs `Scripts/build-deps.sh`, which compiles the vendored
-libdvdcss, libdvdread and a minimal FFmpeg for both architectures into
-`Vendor/build/DiscDeps.xcframework`. That takes a few minutes, once.
-`Scripts/build-deps.sh --force` rebuilds it.
+`xcodegen generate` first runs `Scripts/build-deps.sh`, which compiles the
+vendored libdvdcss, libdvdread and a minimal FFmpeg for both architectures
+into `Vendor/build/DiscDeps.xcframework`. That takes a few minutes the first
+time and is skipped afterwards; `Scripts/build-deps.sh --force` rebuilds it.
 
 The app isn't sandboxed (raw access to the drive requires that) and is signed
 ad hoc for local use.

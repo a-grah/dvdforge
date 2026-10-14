@@ -4,6 +4,9 @@ options:
   deploymentTarget:
     macOS: "15.0"
   createIntermediateGroups: true
+  # Xcode needs DiscDeps.xcframework to exist when it plans a build, before any
+  # target runs, so build it (once; later runs are instant) while generating.
+  preGenCommand: Scripts/build-deps.sh
 
 settings:
   base:
