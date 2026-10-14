@@ -1,34 +1,58 @@
-import DiscCore
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// Placeholder root view for milestone 1: proves the Swift ⇄ C++ bridge and the
-/// vendored libraries are linked. Replaced by the Disc / Rip / Reports UI later.
 struct ContentView: View {
-    private let versions = dc.libraryVersions()
+    @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("dvdForge")
-                .font(.largeTitle.bold())
-            Text("Insert a DVD to begin.")
-                .foregroundStyle(.secondary)
-            Divider()
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
-                row("libdvdread", versions.libdvdread)
-                row("libdvdcss", versions.libdvdcss)
-                row("libavformat", versions.libavformat)
-                row("libavcodec", versions.libavcodec)
+        @Bindable var model = model
+        Group {
+            switch model.state {
+            case .idle:
+                ContentUnavailableView {
+                    Label("No Disc", systemImage: "opticaldisc")
+                } description: {
+                    Text("Insert a DVD, or open an ISO image or VIDEO_TS folder.")
+                } actions: {
+                    Button("Open…") { model.isImporting = true }
+                }
+            case .scanning:
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Reading \(model.source?.displayName ?? "disc")…")
+                    Text("The first read of an encrypted disc can take a minute while keys are retrieved.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case let .failed(message, log):
+                ContentUnavailableView {
+                    Label("Couldn't Read Disc", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                    if !log.isEmpty {
+                        Text(log.joined(separator: "\n"))
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                } actions: {
+                    Button("Try Again") { model.rescan() }
+                }
+            case let .loaded(disc):
+                DiscView(disc: disc)
             }
-            .font(.callout.monospaced())
         }
-        .padding(24)
-        .frame(minWidth: 480, minHeight: 280, alignment: .topLeading)
-    }
-
-    private func row(_ name: String, _ version: std.string) -> some View {
-        GridRow {
-            Text(name).foregroundStyle(.secondary)
-            Text(String(version))
+        .frame(minWidth: 760, minHeight: 480)
+        .task { model.start() }
+        .onChange(of: model.drives.discs) { model.drivesChanged() }
+        .fileImporter(isPresented: $model.isImporting,
+                      allowedContentTypes: [UTType(filenameExtension: "iso") ?? .diskImage, .folder]) { result in
+            if case let .success(url) = result { model.open(.file(url)) }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first else { return false }
+            model.open(.file(url))
+            return true
         }
     }
 }

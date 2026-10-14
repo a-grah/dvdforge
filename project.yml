@@ -98,3 +98,7 @@ schemes:
     test:
       targets:
         - DiscCoreTests
+      preActions:
+        - name: Build test fixture
+          settingsTarget: DiscCoreTests
+          script: '"$SRCROOT/Scripts/make-fixture.sh"'
