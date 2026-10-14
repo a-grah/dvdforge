@@ -29,6 +29,11 @@ struct DvdForgeApp: App {
             }
         }
 
+        Window("Rip History", id: "history") {
+            HistoryView()
+        }
+        .keyboardShortcut("y", modifiers: [.command, .shift])
+
         Settings {
             SettingsView()
         }

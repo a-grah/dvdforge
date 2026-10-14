@@ -9,12 +9,22 @@ struct ContentView: View {
         Group {
             switch model.state {
             case .idle:
-                ContentUnavailableView {
-                    Label("No Disc", systemImage: "opticaldisc")
-                } description: {
-                    Text("Insert a DVD, or open an ISO image or VIDEO_TS folder.")
-                } actions: {
-                    Button("Open…") { model.isImporting = true }
+                if let drive = model.drives.drives.first {
+                    ContentUnavailableView {
+                        Label("Insert a DVD", systemImage: "opticaldisc")
+                    } description: {
+                        Text("\(drive) is ready. You can also open an ISO image, VIDEO_TS folder or .dvdmedia bundle.")
+                    } actions: {
+                        Button("Open…") { model.isImporting = true }
+                    }
+                } else {
+                    ContentUnavailableView {
+                        Label("No DVD Drive", systemImage: "externaldrive.badge.xmark")
+                    } description: {
+                        Text("Connect a DVD drive, or open an ISO image, VIDEO_TS folder or .dvdmedia bundle.")
+                    } actions: {
+                        Button("Open…") { model.isImporting = true }
+                    }
                 }
             case .scanning:
                 VStack(spacing: 12) {
@@ -43,6 +53,11 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 480)
+        .alert("Can't Start Rip", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {
+            Button("OK") { model.alert = nil }
+        } message: {
+            Text(model.alert ?? "")
+        }
         .task { model.start() }
         .onChange(of: model.drives.discs) { model.drivesChanged() }
         .fileImporter(isPresented: $model.isImporting,

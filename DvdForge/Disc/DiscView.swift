@@ -76,7 +76,7 @@ struct DiscView: View {
         if model.isRipping {
             Button("Cancel", role: .cancel) { model.cancelRip() }
         } else if model.rip != nil {
-            Button("Done") { model.endRip() }
+            Button("Done") { model.dismissRip() }
         } else {
             let count = model.selectedTitles.count
             Button(count > 1 ? "Rip \(count) Titles" : "Rip") { model.startRip() }

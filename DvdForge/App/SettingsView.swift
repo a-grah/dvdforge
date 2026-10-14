@@ -5,6 +5,11 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.retries) private var retries = 8
     @AppStorage(SettingsKey.outputFolder) private var outputFolder = SettingsKey.defaultOutputFolder.path
     @AppStorage(SettingsKey.keepStaging) private var keepStaging = false
+    @AppStorage(SettingsKey.preferredLanguages) private var languages = TrackPreferences.systemLanguage
+    @AppStorage(SettingsKey.audioTracks) private var audioTracks = TrackChoice.all
+    @AppStorage(SettingsKey.subtitleTracks) private var subtitleTracks = TrackChoice.all
+    @AppStorage(SettingsKey.autoRip) private var autoRip = false
+    @AppStorage(SettingsKey.ejectWhenDone) private var ejectWhenDone = false
     @State private var choosingFolder = false
 
     var body: some View {
@@ -20,6 +25,33 @@ struct SettingsView: View {
                 Stepper("Retries per damaged sector: \(retries)", value: $retries, in: 1 ... 64)
             } header: {
                 Text("Reading")
+            }
+            Section {
+                TextField("Preferred languages", text: $languages, prompt: Text("en, fr"))
+                Picker("Audio tracks", selection: $audioTracks) {
+                    Text("All").tag(TrackChoice.all)
+                    Text("Preferred languages only").tag(TrackChoice.preferred)
+                }
+                Picker("Subtitles", selection: $subtitleTracks) {
+                    Text("All").tag(TrackChoice.all)
+                    Text("Preferred languages only").tag(TrackChoice.preferred)
+                    Text("None").tag(TrackChoice.none)
+                }
+                Text("Two-letter codes in order of preference. They pre-select tracks when a disc is loaded (you can still change them per title) and choose the MKV's default audio track. A title with no audio in your languages keeps all of its audio.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Languages")
+            }
+            Section {
+                Toggle("Rip the main feature as soon as a disc is inserted", isOn: $autoRip)
+                Toggle("Eject the disc when the rip finishes", isOn: $ejectWhenDone)
+                Text("Together these turn archiving a stack of discs into: insert, wait for the chime, swap.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Batch")
             }
             Section {
                 LabeledContent("Save MKVs to") {

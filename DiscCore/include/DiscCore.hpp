@@ -226,6 +226,7 @@ struct RemuxRequest {
     Title title;                    ///< From ReadResult.
     IntList audioTracks;            ///< AudioTrack::number values to keep, in output order.
     IntList subtitleTracks;         ///< SubtitleTrack::number values to keep, in output order.
+    int defaultAudioTrack = -1;     ///< AudioTrack::number to flag as default; -1 = the first kept.
     std::string movieTitle;
     // Provenance written as Matroska tags.
     std::string discId;

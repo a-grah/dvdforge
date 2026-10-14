@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -44,6 +45,8 @@ final class AppModel {
 
     var selectedTitles: Set<Int> = []
     var isImporting = false
+    /// Shown as an alert, e.g. not enough disk space to start a rip.
+    var alert: String?
     var trackSelections: [Int: TrackSelection] = [:]
 
     @ObservationIgnored private var scanTask: Task<Void, Never>?
@@ -68,14 +71,21 @@ final class AppModel {
     func drivesChanged() {
         if case let .drive(current) = source {
             guard let now = drives.discs.first(where: { $0.bsdName == current.bsdName }) else {
-                // Our disc was ejected.
-                close()
+                if isRipping, let rip {
+                    // Pulled out mid-rip: stop at once rather than retrying a missing disc.
+                    // Keep the panel up so the user sees what happened.
+                    rip.notice = "The disc was removed. Insert it again and rip to resume where it left off; sectors already read are kept."
+                    rip.cancel()
+                    source = nil
+                } else {
+                    close()
+                }
                 return
             }
             source = .drive(now)  // pick up the volume name once mounted
         }
-        // A newly inserted disc takes over unless the user is browsing a file.
-        if source == nil, let disc = drives.discs.first {
+        // A newly inserted disc takes over unless the user is browsing a file or ripping.
+        if source == nil, !isRipping, let disc = drives.discs.first {
             open(.drive(disc))
         }
     }
@@ -95,7 +105,11 @@ final class AppModel {
             } catch {
                 guard !Task.isCancelled else { return }
                 let log = if case let DiscReadError.unreadable(_, log) = error { log } else { [String]() }
-                state = .failed(error.localizedDescription, log: log)
+                var message = error.localizedDescription
+                if case .drive = source {
+                    message = "dvdForge couldn't read this disc's structure. If it is a commercial DVD, the drive may be set to a different region than the disc, or the start of the disc (where its menus and index live) may be damaged. Cleaning the disc or trying another drive can help.\n\n\(message)"
+                }
+                state = .failed(message, log: log)
             }
         }
     }
@@ -127,22 +141,70 @@ final class AppModel {
         let titles = disc.titles.filter { selectedTitles.contains($0.number) }
         guard !titles.isEmpty else { return }
         let defaults = UserDefaults.standard
+        let outputFolder = SettingsKey.outputFolderURL
+        let session = RipSession(titles: titles, discID: disc.discID)
+        if let problem = Self.spaceProblem(bytes: titles.reduce(0) { $0 + $1.byteCount },
+                                           staging: session.stagingDir, output: outputFolder) {
+            alert = problem
+            return
+        }
+        let preferences = TrackPreferences.load(from: defaults)
+        var defaultAudio: [Int: Int] = [:]
+        for title in titles {
+            let selected = trackSelections[title.number]?.audio ?? []
+            defaultAudio[title.number] = preferences.defaultAudio(for: title, selected: selected)
+        }
         let driveModel = if case let .drive(drive) = source { drive.driveModel ?? "" } else { "" }
         let plan = RipPlan(
             discPath: source.path,
             discID: disc.discID,
             movieTitle: disc.volumeLabel.isEmpty ? "Untitled Disc" : disc.volumeLabel.prettifiedVolumeLabel,
             driveModel: driveModel,
-            outputFolder: defaults.string(forKey: SettingsKey.outputFolder).map { URL(filePath: $0) }
-                ?? SettingsKey.defaultOutputFolder,
+            outputFolder: outputFolder,
             verify: VerifyRead(rawValue: defaults.string(forKey: SettingsKey.verifyRead) ?? "") ?? .auto,
             retries: defaults.object(forKey: SettingsKey.retries) as? Int ?? 8,
             keepStaging: defaults.bool(forKey: SettingsKey.keepStaging),
-            tracks: trackSelections)
+            tracks: trackSelections,
+            defaultAudio: defaultAudio)
 
-        let session = RipSession(titles: titles, discID: disc.discID)
         rip = session
-        Task { await session.start(plan) }
+        Task {
+            await session.start(plan)
+            ripFinished(session)
+        }
+    }
+
+    /// Batch flow: announce the result and, if asked, eject so the next disc can go in.
+    private func ripFinished(_ session: RipSession) {
+        guard rip === session, session.notice == nil else { return }
+        NSSound(named: session.allFinished ? "Glass" : "Basso")?.play()
+        NSApp.requestUserAttention(.informationalRequest)
+        if session.allFinished, UserDefaults.standard.bool(forKey: SettingsKey.ejectWhenDone) { eject() }
+    }
+
+    /// A message if staging or output lacks room for `bytes` (with 1 GB slack), nil if fine.
+    private static func spaceProblem(bytes: Int64, staging: URL, output: URL) -> String? {
+        // The folders may not exist yet; ask the nearest existing ancestor.
+        func values(_ url: URL) -> URLResourceValues? {
+            var probe = url
+            while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
+                probe.deleteLastPathComponent()
+            }
+            return try? probe.resourceValues(forKeys: [.volumeURLKey, .volumeAvailableCapacityForImportantUsageKey])
+        }
+        func available(_ url: URL) -> Int64? { values(url)?.volumeAvailableCapacityForImportantUsage }
+        func volume(_ url: URL) -> URL? { values(url)?.volume }
+        let slack: Int64 = 1 << 30
+        let sameVolume = volume(staging) == volume(output)
+        let needed = (sameVolume ? 2 * bytes : bytes) + slack
+        func describe(_ n: Int64) -> String { n.formatted(.byteCount(style: .file)) }
+        if let free = available(staging), free < needed {
+            return "Not enough free disk space. This rip needs about \(describe(needed)) (the raw title data plus the MKV), but only \(describe(free)) is available."
+        }
+        if !sameVolume, let free = available(output), free < bytes + slack {
+            return "Not enough free space in the output folder. The MKV needs about \(describe(bytes)), but only \(describe(free)) is available there."
+        }
+        return nil
     }
 
     func cancelRip() {
@@ -155,13 +217,27 @@ final class AppModel {
         rip = nil
     }
 
+    /// The rip panel's Done button.
+    func dismissRip() {
+        endRip()
+        // The disc went away during the rip; now that the panel is dismissed, reset.
+        if source == nil, case .loaded = state {
+            state = .idle
+            selectedTitles = []
+            trackSelections = [:]
+            drivesChanged()
+        }
+    }
+
     private func load(_ disc: Disc) {
         state = .loaded(disc)
         selectedTitles = disc.mainFeature.map { [$0.number] } ?? []
+        let preferences = TrackPreferences.load()
         for title in disc.titles {
-            trackSelections[title.number] = TrackSelection(
-                audio: Set(title.audio.map(\.number)),
-                subtitles: Set(title.subtitles.map(\.number)))
+            trackSelections[title.number] = preferences.selection(for: title)
+        }
+        if isDriveSource, UserDefaults.standard.bool(forKey: SettingsKey.autoRip) {
+            startRip()
         }
     }
 

@@ -29,6 +29,15 @@ enum SettingsKey {
     static let retries = "readRetries"
     static let outputFolder = "outputFolder"
     static let keepStaging = "keepStaging"
+    static let preferredLanguages = "preferredLanguages"
+    static let audioTracks = "audioTracks"
+    static let subtitleTracks = "subtitleTracks"
+    static let autoRip = "autoRipOnInsert"
+    static let ejectWhenDone = "ejectWhenDone"
+
+    static var outputFolderURL: URL {
+        UserDefaults.standard.string(forKey: outputFolder).map { URL(filePath: $0) } ?? defaultOutputFolder
+    }
 
     static var defaultOutputFolder: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0].appending(path: "dvdForge")
@@ -46,6 +55,8 @@ struct RipPlan: Sendable {
     var retries: Int
     var keepStaging: Bool
     var tracks: [Int: AppModel.TrackSelection]
+    /// Per title, the audio track to flag as default (absent: the first kept).
+    var defaultAudio: [Int: Int] = [:]
 }
 
 /// Swift copies of DiscCore's read types, safe to pass between threads.
@@ -160,6 +171,7 @@ final class RemuxJobHandle: @unchecked Sendable {
         for track in read.title.value.subtitles where selection?.subtitles.contains(Int(track.number)) ?? true {
             request.subtitleTracks.push_back(track.number)
         }
+        request.defaultAudioTrack = Int32(plan.defaultAudio[Int(read.title.value.number)] ?? -1)
         request.movieTitle = std.string(plan.movieTitle)
         request.discId = std.string(plan.discID)
         request.driveModel = std.string(plan.driveModel)
@@ -209,6 +221,7 @@ final class RipSession {
         var status: TitleStatus = .queued
         var progress = ReadSnapshot()
         var map: [MapCell] = []
+        var reportError: String?
         var id: Int { title.number }
     }
 
@@ -216,6 +229,12 @@ final class RipSession {
 
     private(set) var entries: [Entry]
     private(set) var isRunning = false
+    /// Why the rip stopped early, when it wasn't the user (e.g. the disc was removed).
+    var notice: String?
+
+    var allFinished: Bool {
+        entries.allSatisfy { if case .finished = $0.status { true } else { false } }
+    }
     let stagingDir: URL
 
     @ObservationIgnored private var currentRead: ReadJobHandle?
@@ -266,6 +285,15 @@ final class RipSession {
                 entries[index].status = .cancelled
             } else {
                 entries[index].status = .finished(read, result)
+                if let mkv = result.outputURL {
+                    let report = RipReport(plan: plan, title: title, read: read, remux: result, mkv: mkv,
+                                           selection: plan.tracks[title.number])
+                    do {
+                        try report.write(to: RipReport.url(forMKV: mkv))
+                    } catch {
+                        entries[index].reportError = "Couldn't save the rip report: \(error.localizedDescription)"
+                    }
+                }
                 if !plan.keepStaging, let staging = read.stagingURL { removeStaging(staging) }
             }
         }

@@ -8,6 +8,11 @@ struct RipView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if let notice = session.notice {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ForEach(session.entries) { entry in
                     TitleRipView(entry: entry)
                 }
@@ -42,6 +47,9 @@ private struct TitleRipView: View {
             }
             if case let .finished(read, remux) = entry.status {
                 ResultSummary(result: read, remux: remux)
+            }
+            if let reportError = entry.reportError {
+                Label(reportError, systemImage: "exclamationmark.circle").font(.callout).foregroundStyle(.orange)
             }
         }
     }

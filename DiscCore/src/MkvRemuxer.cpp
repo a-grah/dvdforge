@@ -221,12 +221,15 @@ bool RemuxJob::createOutput() {
     if (ret < 0) return fail("Could not create the Matroska muxer", ret);
 
     if (!addVideo()) return false;
+    bool defaultKept = std::find(req_.audioTracks.begin(), req_.audioTracks.end(), req_.defaultAudioTrack) !=
+                       req_.audioTracks.end();
     bool first = true;
     for (int number : req_.audioTracks) {
         auto a = std::find_if(req_.title.audio.begin(), req_.title.audio.end(),
                               [&](const AudioTrack& t) { return t.number == number; });
         if (a == req_.title.audio.end()) continue;
-        if (!addAudio(*a, first)) return false;
+        bool isDefault = defaultKept ? number == req_.defaultAudioTrack : first;
+        if (!addAudio(*a, isDefault)) return false;
         first = false;
     }
     for (int number : req_.subtitleTracks) {

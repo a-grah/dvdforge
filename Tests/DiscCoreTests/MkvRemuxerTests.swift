@@ -16,7 +16,8 @@ import Testing
         var staging: String { String(read.stagingPath) }
     }
 
-    func rip(title: Int32, audio: [Int32], subtitles: [Int32], faults: dc.FaultPlan? = nil) throws -> Ripped {
+    func rip(title: Int32, audio: [Int32], subtitles: [Int32], defaultAudio: Int32 = -1,
+             faults: dc.FaultPlan? = nil) throws -> Ripped {
         let dir = ResilientReaderTests.tempDir()
         let (read, _) = ResilientReaderTests.read(fixture, title: title, verify: .automatic, faults: faults, dir: dir)
         try #require(read.completed, "read failed: \(String(read.error))")
@@ -28,6 +29,7 @@ import Testing
         request.title = read.title
         for a in audio { request.audioTracks.push_back(a) }
         for s in subtitles { request.subtitleTracks.push_back(s) }
+        request.defaultAudioTrack = defaultAudio
         request.movieTitle = "Fixture"
         request.discId = "0123456789abcdef0123456789abcdef"
         request.badSectors = read.bad
@@ -122,6 +124,14 @@ import Testing
         let streams = try #require(try probe(r.mkv)["streams"] as? [[String: Any]])
         #expect(streams.count == 2)
         #expect((streams[1]["tags"] as? [String: Any])?["language"] as? String == "fre")
+    }
+
+    @Test func chosenDefaultAudioTrackIsFlagged() throws {
+        let r = try rip(title: 1, audio: [0, 1], subtitles: [], defaultAudio: 1)
+        let streams = try #require(try probe(r.mkv)["streams"] as? [[String: Any]])
+        try #require(streams.count == 3)
+        #expect((streams[1]["disposition"] as? [String: Int])?["default"] == 0)
+        #expect((streams[2]["disposition"] as? [String: Int])?["default"] == 1)
     }
 
     @Test func lpcmBecomesLosslessFlac() throws {

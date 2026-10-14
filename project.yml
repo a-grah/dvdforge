@@ -65,6 +65,8 @@ targets:
       base:
         PRODUCT_NAME: dvdForge
         PRODUCT_BUNDLE_IDENTIFIER: com.agrah.dvdforge
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_OBJC_INTEROP_MODE: objcxx
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/DiscCore/include"
         ENABLE_HARDENED_RUNTIME: YES
@@ -90,6 +92,23 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_IDENTITY: "-"
 
+  DvdForgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/DvdForgeTests
+    dependencies:
+      - target: DvdForge
+    settings:
+      base:
+        # The app's product name differs from its target name.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/dvdForge.app/Contents/MacOS/dvdForge"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/DiscCore/include"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+
 schemes:
   dvdForge:
     build:
@@ -98,6 +117,7 @@ schemes:
     test:
       targets:
         - DiscCoreTests
+        - DvdForgeTests
       preActions:
         - name: Build test fixture
           settingsTarget: DiscCoreTests
