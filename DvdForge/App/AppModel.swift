@@ -72,6 +72,19 @@ final class AppModel {
         var tracks: [Int: TrackSelection]
     }
     @ObservationIgnored private var resumeWhenBack: ResumePlan?
+    @ObservationIgnored private var autoRipSkipRetries = false
+    /// Times the drive dropped out while working on damage, per disc ID.
+    @ObservationIgnored private var dropOutsOnDamage: [String: Int] = [:]
+    /// Unfinished earlier rips of this disc's titles, by title number.
+    private(set) var unfinished: [Int: UnfinishedRip] = [:]
+
+    /// Unfinished rips among the selected titles, combined.
+    var unfinishedSelection: UnfinishedRip? {
+        let parts = selectedTitles.compactMap { unfinished[$0] }
+        guard !parts.isEmpty else { return nil }
+        return UnfinishedRip(total: parts.map(\.total).reduce(0, +), good: parts.map(\.good).reduce(0, +),
+                             damaged: parts.map(\.damaged).reduce(0, +))
+    }
 
     var isDriveSource: Bool {
         if case .drive = source { true } else { false }
@@ -164,7 +177,7 @@ final class AppModel {
 
     var isRipping: Bool { rip?.isRunning == true }
 
-    func startRip() {
+    func startRip(skipRetries: Bool = false) {
         guard let disc, let source, !isRipping else { return }
         let titles = disc.titles.filter { selectedTitles.contains($0.number) }
         guard !titles.isEmpty else { return }
@@ -192,6 +205,7 @@ final class AppModel {
             verify: VerifyRead(rawValue: defaults.string(forKey: SettingsKey.verifyRead) ?? "") ?? .auto,
             retries: defaults.object(forKey: SettingsKey.retries) as? Int ?? 8,
             keepStaging: defaults.bool(forKey: SettingsKey.keepStaging),
+            skipRetries: skipRetries,
             tracks: trackSelections,
             defaultAudio: defaultAudio,
             movie: identifiedMovie)
@@ -203,16 +217,31 @@ final class AppModel {
         }
     }
 
+    private func refreshUnfinished() {
+        guard let disc else {
+            unfinished = [:]
+            return
+        }
+        var found: [Int: UnfinishedRip] = [:]
+        for title in disc.titles {
+            if let u = UnfinishedRip.check(discID: disc.discID, title: title.number) { found[title.number] = u }
+        }
+        unfinished = found
+    }
+
     private func driveLost(during session: RipSession) {
         guard let disc else { return }
         resumeWhenBack = ResumePlan(discID: disc.discID, titles: selectedTitles, tracks: trackSelections)
+        if session.isWorkingOnDamage { dropOutsOnDamage[disc.discID, default: 0] += 1 }
         session.notice = "The drive stopped responding (it can reset itself on a badly scratched area) or the disc was removed. Leave the disc in: when it comes back, dvdForge resumes where it left off and skips the area that caused the trouble. Everything read so far is kept."
     }
 
     /// Batch flow: announce the result and, if asked, eject so the next disc can go in.
     private func ripFinished(_ session: RipSession) {
         if rip === session, session.deviceLost, session.notice == nil { driveLost(during: session) }
+        refreshUnfinished()
         guard rip === session, session.notice == nil else { return }
+        if session.allFinished, let disc { dropOutsOnDamage[disc.discID] = nil }
         NSSound(named: session.allFinished ? "Glass" : "Basso")?.play()
         NSApp.requestUserAttention(.informationalRequest)
         if session.allFinished, UserDefaults.standard.bool(forKey: SettingsKey.ejectWhenDone) { eject() }
@@ -276,12 +305,15 @@ final class AppModel {
         if let resume = resumeWhenBack {
             resumeWhenBack = nil
             if resume.discID == disc.discID, isDriveSource {
-                // Same disc back after a drive reset: same choices, carry on.
+                // Same disc back after a drive reset: same choices, carry on. If the
+                // drive has now dropped out twice on the damage, stop sending it there.
                 selectedTitles = resume.titles
                 trackSelections = resume.tracks
                 autoRipAfterLookup = true
+                autoRipSkipRetries = dropOutsOnDamage[disc.discID, default: 0] >= 2
             }
         }
+        refreshUnfinished()
         identify(disc)
     }
 
@@ -346,7 +378,12 @@ final class AppModel {
     private func lookupFinished() {
         guard autoRipAfterLookup else { return }
         autoRipAfterLookup = false
-        startRip()
+        let skip = autoRipSkipRetries
+        autoRipSkipRetries = false
+        startRip(skipRetries: skip)
+        if skip {
+            rip?.info = "The drive dropped out twice while working on the damaged area, so dvdForge is finishing without going back to it. The unread part is left blank and listed in the rip report."
+        }
     }
 
     // MARK: - Selection bindings

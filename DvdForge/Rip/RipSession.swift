@@ -54,6 +54,8 @@ struct RipPlan: Sendable {
     var verify: VerifyRead
     var retries: Int
     var keepStaging: Bool
+    /// Finish without going back to damage (see dc::ReadOptions::skipRetries).
+    var skipRetries = false
     var tracks: [Int: AppModel.TrackSelection]
     /// Per title, the audio track to flag as default (absent: the first kept).
     var defaultAudio: [Int: Int] = [:]
@@ -145,10 +147,11 @@ private struct UncheckedPointer: @unchecked Sendable {
 final class ReadJobHandle: @unchecked Sendable {
     private let job: OpaquePointer
 
-    init(discPath: String, title: Int, stagingDir: URL, verify: VerifyRead, retries: Int) {
+    init(discPath: String, title: Int, stagingDir: URL, verify: VerifyRead, retries: Int, skipRetries: Bool) {
         var options = dc.ReadOptions()
         options.verify = verify.core
         options.retries = Int32(retries)
+        options.skipRetries = skipRetries
         // Development aid: `-simulateDamage 1000-4000@300` makes title sectors
         // 1000..<4000 (VTS-relative) unreadable, each failure taking 300 ms, to
         // exercise the damage UI without a scratched disc.
@@ -299,6 +302,8 @@ final class RipSession {
     private(set) var isRunning = false
     /// Why the rip stopped early, when it wasn't the user (e.g. the disc was removed).
     var notice: String?
+    /// Something worth knowing about how this rip is running (not an interruption).
+    var info: String?
     /// The drive vanished mid-read (reset or unplugged); the rip can resume.
     private(set) var deviceLost = false
 
@@ -313,9 +318,20 @@ final class RipSession {
 
     init(titles: [DiscTitle], discID: String) {
         entries = titles.map { Entry(title: $0) }
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        stagingDir = caches.appending(path: Bundle.main.bundleIdentifier ?? "dvdForge")
+        stagingDir = Self.stagingDir(discID: discID)
+    }
+
+    nonisolated static func stagingDir(discID: String) -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appending(path: Bundle.main.bundleIdentifier ?? "dvdForge")
             .appending(path: discID.isEmpty ? "unknown-disc" : discID)
+    }
+
+    /// True while a title is in the trim or scrape pass (working on damage).
+    var isWorkingOnDamage: Bool {
+        entries.contains {
+            if case .reading = $0.status { $0.progress.pass == .trim || $0.progress.pass == .scrape } else { false }
+        }
     }
 
     func start(_ plan: RipPlan) async {
@@ -383,7 +399,8 @@ final class RipSession {
     /// Runs the multi-pass read; nil if it failed or was cancelled.
     private func read(_ index: Int, plan: RipPlan) async -> TitleReadResult? {
         let job = ReadJobHandle(discPath: plan.discPath, title: entries[index].title.number,
-                                stagingDir: stagingDir, verify: plan.verify, retries: plan.retries)
+                                stagingDir: stagingDir, verify: plan.verify, retries: plan.retries,
+                                skipRetries: plan.skipRetries)
         currentRead = job
         entries[index].status = .reading
         entries[index].started = Date()
@@ -536,4 +553,20 @@ extension String {
 
 extension UInt64 {
     func saturatingSubtract(_ other: UInt64) -> UInt64 { self > other ? self - other : 0 }
+}
+
+/// What an earlier, unfinished rip of a title left behind (see dc::stagedRead).
+struct UnfinishedRip: Sendable, Equatable {
+    var total: UInt64
+    var good: UInt64
+    var damaged: UInt64  // pending + bad + unstable
+
+    var fractionRead: Double { total == 0 ? 0 : Double(good) / Double(total) }
+    var damagedDescription: String { (Int64(damaged) * 2048).formatted(.byteCount(style: .file)) }
+
+    static func check(discID: String, title: Int) -> UnfinishedRip? {
+        let r = dc.stagedRead(std.string(RipSession.stagingDir(discID: discID).path), Int32(title))
+        guard r.exists, r.good < r.totalSectors else { return nil }
+        return UnfinishedRip(total: r.totalSectors, good: r.good, damaged: r.pending + r.bad + r.unstable)
+    }
 }

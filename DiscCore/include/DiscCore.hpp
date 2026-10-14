@@ -140,6 +140,10 @@ struct ReadOptions {
     /// its sectors are marked for later and the map saved at once, so a drive
     /// reset doesn't send the next resume straight back into it.
     double slowReadSeconds = 10;
+    /// Read anything never tried, but don't go back to damage at all: what is
+    /// still unread is zero-filled and reported. For finishing a resumed rip on
+    /// a disc whose damage hangs the drive.
+    bool skipRetries = false;
 };
 
 /// State of each sector of the title, in title (playback) order.
@@ -231,6 +235,19 @@ struct FaultPlan {
     int slowDelayMs = 0;
     int64_t vanishAtSector = -1;          ///< Reading this sector makes the device disappear.
 };
+
+/// What an earlier, unfinished read of a title left in `stagingDir`.
+struct StagedRead {
+    bool exists = false;
+    uint64_t totalSectors = 0;
+    uint64_t good = 0;
+    uint64_t untried = 0;
+    uint64_t pending = 0;
+    uint64_t bad = 0;
+    uint64_t unstable = 0;
+};
+
+StagedRead stagedRead(const std::string& stagingDir, int titleNumber);
 
 /// A read of one title into a staging file. Opaque; drive it with the functions
 /// below. `run` blocks, so call it on a background thread; `progress` and

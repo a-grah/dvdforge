@@ -214,6 +214,34 @@ import Testing
         #expect(clock.now - start < .seconds(10))
     }
 
+    @Test func resumedRipCanFinishWithoutTouchingDamage() throws {
+        let dir = Self.tempDir()
+        // First attempt: damage found, then the drive drops out before retries.
+        var faults = dc.FaultPlan()
+        for s in base + 1000 ..< base + 1100 { faults.hardBad.push_back(s) }
+        faults.vanishAtSector = Int64(base + 4500)
+        let (first, _) = Self.read(fixture, title: mainTitle, verify: .off, faults: faults, dir: dir)
+        #expect(first.deviceLost)
+
+        let staged = dc.stagedRead(std.string(dir.path), mainTitle)
+        #expect(staged.exists && staged.totalSectors == totalSectors)
+        #expect(staged.pending > 0 && staged.untried > 0 && staged.good > 0)
+
+        // Second attempt, skipping retries: the damage is never read again (it
+        // would fail if it were), the untried rest is read, and the title finishes.
+        var hang = dc.FaultPlan()
+        for s in base + 1000 ..< base + 1100 { hang.hardBad.push_back(s) }
+        hang.failureDelayMs = 5000  // any read of the damage would make this test slow
+        let clock = ContinuousClock(), start = clock.now
+        let (second, _) = Self.read(fixture, title: mainTitle, verify: .automatic, faults: hang, dir: dir) {
+            $0.skipRetries = true
+        }
+        #expect(clock.now - start < .seconds(3))
+        #expect(second.completed && second.stoppedRetrying && !second.verifyRan)
+        #expect(second.bad == staged.pending + staged.bad && second.good == totalSectors - second.bad)
+        #expect(dc.stagedRead(std.string(dir.path), 99).exists == false)
+    }
+
     @Test func stopRetryingFinishesWithWhatWasRead() async throws {
         let dir = Self.tempDir()
         var faults = dc.FaultPlan()

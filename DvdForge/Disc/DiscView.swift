@@ -56,6 +56,13 @@ struct DiscView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                 IdentityRow()
+                if model.rip == nil, let unfinished = model.unfinishedSelection {
+                    Label("A previous rip stopped at \(unfinished.fractionRead.formatted(.percent.precision(.fractionLength(1)))) read"
+                          + (unfinished.damaged > 0 ? ", with \(unfinished.damagedDescription) damaged." : "."),
+                          systemImage: "arrow.clockwise.circle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
             if !disc.warnings.isEmpty {
@@ -90,6 +97,13 @@ struct DiscView: View {
             Button("Cancel", role: .cancel) { model.cancelRip() }
         } else if model.rip != nil {
             Button("Done") { model.dismissRip() }
+        } else if let unfinished = model.unfinishedSelection {
+            Button("Finish Without Retrying") { model.startRip(skipRetries: true) }
+                .help("Read anything not yet read, but don't go back to the damaged area. What's still unread (\(unfinished.damagedDescription)) is left blank and listed in the rip report.")
+                .disabled(unfinished.damaged == 0)
+            Button("Resume") { model.startRip() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
         } else {
             let count = model.selectedTitles.count
             Button(count > 1 ? "Rip \(count) Titles" : "Rip") { model.startRip() }

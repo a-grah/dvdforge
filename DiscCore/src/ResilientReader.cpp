@@ -876,7 +876,9 @@ ReadResult ReadJob::run() {
     if (!prepare(result)) return result;
 
     std::thread dog([this] { watchdog(); });
+    if (options_.skipRetries) log("Finishing without retrying damaged areas, as asked.");
     sweep();
+    if (options_.skipRetries) stopRetrying_ = true;  // trim and scrape just zero-fill what's left
     if (!isCancelled()) trim();
     if (!isCancelled()) scrape();
     if (!isCancelled() && !stopRetrying_ && shouldVerify()) {
@@ -914,6 +916,32 @@ ReadResult ReadJob::run() {
 }
 
 // MARK: - Public API
+
+StagedRead stagedRead(const std::string& stagingDir, int titleNumber) {
+    StagedRead r;
+    fs::path map = fs::path(stagingDir) / ("title-" + twoDigits(titleNumber) + ".map");
+    fs::path vob = fs::path(stagingDir) / ("title-" + twoDigits(titleNumber) + ".vob");
+    std::ifstream in(map);
+    std::string magic, key;
+    int version = 0, title = 0;
+    uint64_t total = 0;
+    if (!fs::exists(vob) || !(in >> magic >> version >> key >> title >> key >> total)) return r;
+    if (magic != "dvdforge-sectormap" || version != 1 || title != titleNumber) return r;
+    r.exists = true;
+    r.totalSectors = total;
+    uint64_t start, n;
+    int state;
+    while (in >> start >> n >> state) {
+        switch (static_cast<SectorState>(state)) {
+        case SectorState::good: r.good += n; break;
+        case SectorState::untried: r.untried += n; break;
+        case SectorState::pending: r.pending += n; break;
+        case SectorState::bad: r.bad += n; break;
+        case SectorState::unstable: r.unstable += n; break;
+        }
+    }
+    return r;
+}
 
 ReadJob* createReadJob(const std::string& discPath, int titleNumber, const std::string& stagingDir,
                        const ReadOptions& options) {

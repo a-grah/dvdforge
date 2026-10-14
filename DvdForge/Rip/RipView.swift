@@ -8,6 +8,11 @@ struct RipView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if let info = session.info {
+                    Label(info, systemImage: "info.circle")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let notice = session.notice {
                     Label(notice, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
