@@ -17,7 +17,9 @@ struct DiscView: View {
             .frame(minHeight: 200)
 
             Group {
-                if let title = disc.titles.first(where: { $0.id == focusedTitle }) {
+                if let rip = model.rip {
+                    RipView(session: rip)
+                } else if let title = disc.titles.first(where: { $0.id == focusedTitle }) {
                     TitleDetailView(title: title)
                 } else {
                     Text("Select a title to see its chapters and tracks.")
@@ -63,9 +65,25 @@ struct DiscView: View {
             }
             if model.isDriveSource {
                 Button("Eject", systemImage: "eject") { model.eject() }
+                    .disabled(model.isRipping)
             }
+            ripButton
         }
         .padding()
+    }
+
+    @ViewBuilder private var ripButton: some View {
+        if model.isRipping {
+            Button("Cancel", role: .cancel) { model.cancelRip() }
+        } else if model.rip != nil {
+            Button("Done") { model.endRip() }
+        } else {
+            let count = model.selectedTitles.count
+            Button(count > 1 ? "Rip \(count) Titles" : "Rip") { model.startRip() }
+                .buttonStyle(.borderedProminent)
+                .disabled(count == 0)
+                .keyboardShortcut(.return, modifiers: .command)
+        }
     }
 
     private var subtitle: String {
@@ -84,6 +102,7 @@ struct DiscView: View {
                     get: { model.isTitleSelected(title.number) },
                     set: { model.setTitle(title.number, selected: $0) }))
                     .labelsHidden()
+                    .disabled(model.rip != nil)
             }
             .width(32)
             TableColumn("Title") { title in

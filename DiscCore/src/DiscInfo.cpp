@@ -1,4 +1,4 @@
-#include "DiscCore.hpp"
+#include "Internal.hpp"
 
 #include <cstdarg>
 #include <cstdio>
@@ -15,10 +15,6 @@ namespace {
 
 // MARK: - libdvdread plumbing
 
-struct LogSink {
-    std::vector<std::string> lines;
-};
-
 void logCallback(void* priv, dvd_logger_level_t level, const char* fmt, va_list args) {
     if (level == DVD_LOGGER_LEVEL_DEBUG || level == DVD_LOGGER_LEVEL_INFO) return;
     char buf[512];
@@ -26,13 +22,9 @@ void logCallback(void* priv, dvd_logger_level_t level, const char* fmt, va_list 
     static_cast<LogSink*>(priv)->lines.emplace_back(buf);
 }
 
-struct DvdCloser {
-    void operator()(dvd_reader_t* d) const { DVDClose(d); }
-};
 struct IfoCloser {
     void operator()(ifo_handle_t* i) const { ifoClose(i); }
 };
-using DvdPtr = std::unique_ptr<dvd_reader_t, DvdCloser>;
 using IfoPtr = std::unique_ptr<ifo_handle_t, IfoCloser>;
 
 // MARK: - Field decoding
@@ -213,32 +205,40 @@ void classifyTitles(TitleList& titles) {
     if (main) main->isMainFeature = true;
 }
 
-DiscInfo readDiscInfo(const std::string& path) {
-    DiscInfo info;
-    LogSink sink;
-    dvd_logger_cb logger{logCallback};
+DvdPtr openDvd(const std::string& path, LogSink& sink) {
+    static const dvd_logger_cb logger{logCallback};
+    return DvdPtr(DVDOpen2(&sink, &logger, path.c_str()));
+}
 
-    DvdPtr dvd(DVDOpen2(&sink, &logger, path.c_str()));
+DiscInfo readDiscInfo(const std::string& path) {
+    LogSink sink;
+    DvdPtr dvd = openDvd(path, sink);
     if (!dvd) {
+        DiscInfo info;
         info.error = "Could not open " + path + " as a DVD.";
         info.log = std::move(sink.lines);
         return info;
     }
+    return readDiscInfo(dvd.get(), sink);
+}
+
+DiscInfo readDiscInfo(dvd_reader_t* dvd, LogSink& sink) {
+    DiscInfo info;
 
     char volid[33] = {};
     unsigned char volsetid[128] = {};
-    if (DVDUDFVolumeInfo(dvd.get(), volid, sizeof volid, volsetid, sizeof volsetid) != 0)
-        DVDISOVolumeInfo(dvd.get(), volid, sizeof volid, volsetid, sizeof volsetid);
+    if (DVDUDFVolumeInfo(dvd, volid, sizeof volid, volsetid, sizeof volsetid) != 0)
+        DVDISOVolumeInfo(dvd, volid, sizeof volid, volsetid, sizeof volsetid);
     info.volumeLabel = volid;
     while (!info.volumeLabel.empty() && info.volumeLabel.back() == ' ') info.volumeLabel.pop_back();
 
     unsigned char discId[16];
-    if (DVDDiscID(dvd.get(), discId) == 0) info.discId = hex(discId, sizeof discId);
+    if (DVDDiscID(dvd, discId) == 0) info.discId = hex(discId, sizeof discId);
 
-    IfoPtr vmg(ifoOpen(dvd.get(), 0));
+    IfoPtr vmg(ifoOpen(dvd, 0));
     if (!vmg || !vmg->tt_srpt) {
         info.error = "The disc's VIDEO_TS.IFO is missing or unreadable.";
-        info.log = std::move(sink.lines);
+        info.log = sink.lines;
         return info;
     }
 
@@ -247,7 +247,7 @@ DiscInfo readDiscInfo(const std::string& path) {
     for (int i = 0; i < tt->nr_of_srpts; ++i) {
         const title_info_t& ti = tt->title[i];
         auto [it, inserted] = titleSets.try_emplace(ti.title_set_nr);
-        if (inserted) it->second.reset(ifoOpen(dvd.get(), ti.title_set_nr));
+        if (inserted) it->second.reset(ifoOpen(dvd, ti.title_set_nr));
         ifo_handle_t* vts = it->second.get();
         if (!vts || !vts->vtsi_mat) {
             sink.lines.push_back("title " + std::to_string(i + 1) + ": VTS " +
@@ -264,7 +264,7 @@ DiscInfo readDiscInfo(const std::string& path) {
 
     classifyTitles(info.titles);
     info.ok = true;
-    info.log = std::move(sink.lines);
+    info.log = sink.lines;
     return info;
 }
 

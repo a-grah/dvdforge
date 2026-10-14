@@ -40,6 +40,7 @@ final class AppModel {
     let drives = DriveMonitor()
     private(set) var source: Source?
     private(set) var state: State = .idle
+    private(set) var rip: RipSession?
 
     var selectedTitles: Set<Int> = []
     var isImporting = false
@@ -81,6 +82,7 @@ final class AppModel {
 
     func open(_ source: Source) {
         scanTask?.cancel()
+        endRip()
         self.source = source
         state = .scanning
         selectedTitles = []
@@ -104,6 +106,7 @@ final class AppModel {
 
     func close() {
         scanTask?.cancel()
+        endRip()
         source = nil
         state = .idle
         selectedTitles = []
@@ -113,6 +116,33 @@ final class AppModel {
     func eject() {
         guard case let .drive(disc) = source else { return }
         drives.eject(disc)
+    }
+
+    // MARK: - Ripping
+
+    var isRipping: Bool { rip?.isRunning == true }
+
+    func startRip() {
+        guard let disc, let source, !isRipping else { return }
+        let titles = disc.titles.filter { selectedTitles.contains($0.number) }
+        guard !titles.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        let verify = VerifyRead(rawValue: defaults.string(forKey: SettingsKey.verifyRead) ?? "") ?? .auto
+        let retries = defaults.object(forKey: SettingsKey.retries) as? Int ?? 8
+
+        let session = RipSession(titles: titles, discID: disc.discID)
+        rip = session
+        Task { await session.start(discPath: source.path, verify: verify, retries: retries) }
+    }
+
+    func cancelRip() {
+        rip?.cancel()
+    }
+
+    /// Cancels a running rip (it can resume later) and hides the rip panel.
+    func endRip() {
+        rip?.cancel()
+        rip = nil
     }
 
     private func load(_ disc: Disc) {

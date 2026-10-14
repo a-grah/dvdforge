@@ -28,5 +28,9 @@ struct DvdForgeApp: App {
                     .disabled(model.source == nil)
             }
         }
+
+        Settings {
+            SettingsView()
+        }
     }
 }

@@ -112,4 +112,101 @@ DiscInfo readDiscInfo(const std::string& path);
 /// already calls it.
 void classifyTitles(TitleList& titles);
 
+// MARK: - Resilient title reading
+
+inline constexpr uint32_t kSectorSize = 2048;
+
+/// When to run the verification re-read (pass 3).
+enum class VerifyMode : uint8_t {
+    off,
+    automatic,  ///< Only if passes 1–2 hit any read error (default).
+    always,
+};
+
+struct ReadOptions {
+    VerifyMode verify = VerifyMode::automatic;
+    int retries = 8;                ///< Per-sector attempts in pass 2 and pass 3 voting.
+    uint32_t chunkSectors = 512;    ///< Pass 1 read size (1 MiB).
+};
+
+/// State of each sector of the title, in title (playback) order.
+enum class SectorState : uint8_t {
+    untried = 0,
+    good = 1,
+    pending = 2,     ///< In a chunk that failed in pass 1; not yet scraped.
+    bad = 3,         ///< Unreadable after all retries; zero-filled in the staging file.
+    unstable = 4,    ///< Reads disagreed and no value won a majority.
+};
+
+enum class ReadPass : uint8_t { opening, sweep, scrape, verify, done };
+
+struct ReadProgress {
+    ReadPass pass = ReadPass::opening;
+    uint64_t passDone = 0;          ///< Sectors handled in the current pass.
+    uint64_t passTotal = 0;
+    uint64_t totalSectors = 0;
+    uint64_t good = 0;
+    uint64_t bad = 0;
+    uint64_t pending = 0;
+    uint64_t unstable = 0;
+    uint64_t repaired = 0;          ///< Sectors corrected by the verification pass.
+    uint64_t readErrors = 0;        ///< Failed read calls so far (all passes).
+    double bytesPerSecond = 0;      ///< Recent read throughput.
+};
+
+/// A run of unreadable or unstable sectors, located in the title's timeline.
+struct DamagedRange {
+    uint64_t firstSector = 0;       ///< Title-relative.
+    uint64_t sectorCount = 0;
+    SectorState state = SectorState::bad;
+    uint64_t startTicks = 0;        ///< Approximate playback position.
+    int chapter = 0;
+};
+
+struct ReadResult {
+    bool completed = false;
+    bool cancelled = false;
+    std::string error;
+    std::string stagingPath;        ///< The title's data, cells concatenated in playback order.
+    uint64_t totalSectors = 0;
+    uint64_t good = 0;
+    uint64_t bad = 0;
+    uint64_t unstable = 0;
+    uint64_t repaired = 0;
+    uint64_t readErrors = 0;
+    uint64_t sectorsReadFromDisc = 0;  ///< Less than the total when a rip resumed.
+    bool verifyRan = false;
+    bool resumed = false;
+    std::vector<DamagedRange> damage;
+};
+
+/// Simulated media faults, keyed by VTS-relative sector. Tests only.
+struct FaultPlan {
+    std::vector<uint32_t> hardBad;        ///< Always fail.
+    std::vector<uint32_t> intermittent;   ///< Fail the first `intermittentFailures` reads.
+    int intermittentFailures = 2;
+    std::vector<uint32_t> flipped;        ///< First read returns corrupted data, silently.
+    uint64_t cancelAfterSectors = 0;      ///< Cancel the job once this many sectors were read.
+};
+
+/// A read of one title into a staging file. Opaque; drive it with the functions
+/// below. `run` blocks, so call it on a background thread; `progress` and
+/// `cancel` are safe to call from any thread while it runs.
+class ReadJob;
+
+/// Staging files go in `stagingDir` as title-NN.vob plus a title-NN.map sector
+/// map, which lets an interrupted rip resume without re-reading good sectors.
+ReadJob* createReadJob(const std::string& discPath, int titleNumber, const std::string& stagingDir,
+                       const ReadOptions& options);
+ReadJob* createReadJobWithFaults(const std::string& discPath, int titleNumber,
+                                 const std::string& stagingDir, const ReadOptions& options,
+                                 const FaultPlan& faults);
+ReadResult runReadJob(ReadJob* job);
+ReadProgress readJobProgress(ReadJob* job);
+/// The sector map squeezed into `buckets` cells, each the worst state inside it,
+/// for drawing.
+std::vector<SectorState> readJobMapSummary(ReadJob* job, int buckets);
+void cancelReadJob(ReadJob* job);
+void destroyReadJob(ReadJob* job);
+
 } // namespace dc
