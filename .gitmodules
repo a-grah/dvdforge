@@ -1,0 +1,12 @@
+[submodule "Vendor/src/libdvdcss"]
+	path = Vendor/src/libdvdcss
+	url = https://code.videolan.org/videolan/libdvdcss.git
+	shallow = true
+[submodule "Vendor/src/libdvdread"]
+	path = Vendor/src/libdvdread
+	url = https://code.videolan.org/videolan/libdvdread.git
+	shallow = true
+[submodule "Vendor/src/ffmpeg"]
+	path = Vendor/src/ffmpeg
+	url = https://git.ffmpeg.org/ffmpeg.git
+	shallow = true

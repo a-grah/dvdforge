@@ -1,0 +1,5 @@
+module DiscCore {
+    header "DiscCore.hpp"
+    requires cplusplus
+    export *
+}

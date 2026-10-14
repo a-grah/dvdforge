@@ -1,0 +1,100 @@
+name: dvdForge
+options:
+  bundleIdPrefix: com.agrah.dvdforge
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CLANG_CXX_LANGUAGE_STANDARD: c++20
+    ARCHS: "$(ARCHS_STANDARD)"
+    # build-deps.sh writes into Vendor/, which the script sandbox would block.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  Deps:
+    type: ""
+    platform: macOS
+    legacy:
+      toolPath: /bin/zsh
+      arguments: "$(SRCROOT)/Scripts/build-deps.sh"
+      workingDirectory: "$(SRCROOT)"
+
+  DiscCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: DiscCore
+    dependencies:
+      - target: Deps
+      - framework: Vendor/build/DiscDeps.xcframework
+        link: false
+    settings:
+      base:
+        PRODUCT_NAME: DiscCore
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/DiscCore/include"
+        # Treat the vendored headers (copied here from the xcframework) as system headers.
+        OTHER_CFLAGS: "-isystem $(BUILT_PRODUCTS_DIR)/include"
+
+  DvdForge:
+    type: application
+    platform: macOS
+    sources:
+      - path: DvdForge
+    dependencies:
+      - target: DiscCore
+      - framework: Vendor/build/DiscDeps.xcframework
+        embed: false
+      - sdk: IOKit.framework
+      - sdk: DiskArbitration.framework
+      - sdk: CoreFoundation.framework
+    info:
+      path: DvdForge/Info.plist
+      properties:
+        CFBundleDisplayName: dvdForge
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: "Personal archival tool"
+    entitlements:
+      path: DvdForge/DvdForge.entitlements
+      properties:
+        # Raw optical-device access and CSS ioctls are incompatible with the App Sandbox.
+        com.apple.security.app-sandbox: false
+    settings:
+      base:
+        PRODUCT_NAME: dvdForge
+        PRODUCT_BUNDLE_IDENTIFIER: com.agrah.dvdforge
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/DiscCore/include"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        GENERATE_INFOPLIST_FILE: YES
+
+  DiscCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/DiscCoreTests
+    dependencies:
+      - target: DiscCore
+      - framework: Vendor/build/DiscDeps.xcframework
+        embed: false
+      - sdk: IOKit.framework
+      - sdk: CoreFoundation.framework
+    settings:
+      base:
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/DiscCore/include"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+
+schemes:
+  dvdForge:
+    build:
+      targets:
+        DvdForge: all
+    test:
+      targets:
+        - DiscCoreTests
