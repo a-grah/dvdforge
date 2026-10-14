@@ -3,6 +3,9 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage(SettingsKey.verifyRead) private var verifyRead = VerifyRead.auto
     @AppStorage(SettingsKey.retries) private var retries = 8
+    @AppStorage(SettingsKey.outputFolder) private var outputFolder = SettingsKey.defaultOutputFolder.path
+    @AppStorage(SettingsKey.keepStaging) private var keepStaging = false
+    @State private var choosingFolder = false
 
     var body: some View {
         Form {
@@ -18,8 +21,33 @@ struct SettingsView: View {
             } header: {
                 Text("Reading")
             }
+            Section {
+                LabeledContent("Save MKVs to") {
+                    HStack {
+                        Text(URL(filePath: outputFolder).abbreviatedPath)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Choose…") { choosingFolder = true }
+                    }
+                }
+                Toggle("Keep staging files after a successful rip", isOn: $keepStaging)
+                Text("Staging files are the raw title data read from the disc (several GB each). Keeping them lets you re-run the MKV step without the disc.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Output")
+            }
         }
         .formStyle(.grouped)
+        .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder]) { result in
+            if case let .success(url) = result { outputFolder = url.path }
+        }
         .frame(width: 460)
     }
+}
+
+private extension URL {
+    /// "/Users/me/Movies/dvdForge" → "~/Movies/dvdForge".
+    var abbreviatedPath: String { (path as NSString).abbreviatingWithTildeInPath }
 }

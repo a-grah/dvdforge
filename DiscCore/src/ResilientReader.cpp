@@ -213,6 +213,7 @@ private:
     DvdPtr dvd_;
     std::unique_ptr<SectorSource> source_;
     std::vector<Extent> extents_;
+    Title title_;
     fs::path stagingPath_, mapPath_;
     int fd_ = -1;
 
@@ -250,6 +251,7 @@ bool ReadJob::prepare(ReadResult& result) {
         return false;
     }
 
+    title_ = *title;
     uint64_t pos = 0, ticks = 0;
     for (const CellRange& c : title->cells) {
         uint32_t n = c.lastSector - c.firstSector + 1;
@@ -562,6 +564,7 @@ ReadResult ReadJob::run() {
     result.readErrors = progress_.readErrors;
     result.sectorsReadFromDisc = sectorsRead_;
     result.damage = damage();
+    result.title = title_;
     return result;
 }
 

@@ -127,12 +127,22 @@ final class AppModel {
         let titles = disc.titles.filter { selectedTitles.contains($0.number) }
         guard !titles.isEmpty else { return }
         let defaults = UserDefaults.standard
-        let verify = VerifyRead(rawValue: defaults.string(forKey: SettingsKey.verifyRead) ?? "") ?? .auto
-        let retries = defaults.object(forKey: SettingsKey.retries) as? Int ?? 8
+        let driveModel = if case let .drive(drive) = source { drive.driveModel ?? "" } else { "" }
+        let plan = RipPlan(
+            discPath: source.path,
+            discID: disc.discID,
+            movieTitle: disc.volumeLabel.isEmpty ? "Untitled Disc" : disc.volumeLabel.prettifiedVolumeLabel,
+            driveModel: driveModel,
+            outputFolder: defaults.string(forKey: SettingsKey.outputFolder).map { URL(filePath: $0) }
+                ?? SettingsKey.defaultOutputFolder,
+            verify: VerifyRead(rawValue: defaults.string(forKey: SettingsKey.verifyRead) ?? "") ?? .auto,
+            retries: defaults.object(forKey: SettingsKey.retries) as? Int ?? 8,
+            keepStaging: defaults.bool(forKey: SettingsKey.keepStaging),
+            tracks: trackSelections)
 
         let session = RipSession(titles: titles, discID: disc.discID)
         rip = session
-        Task { await session.start(discPath: source.path, verify: verify, retries: retries) }
+        Task { await session.start(plan) }
     }
 
     func cancelRip() {

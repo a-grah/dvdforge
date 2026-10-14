@@ -178,6 +178,7 @@ struct ReadResult {
     bool verifyRan = false;
     bool resumed = false;
     std::vector<DamagedRange> damage;
+    Title title;                    ///< The title's structure, as read from this disc (for remuxing).
 };
 
 /// Simulated media faults, keyed by VTS-relative sector. Tests only.
@@ -208,5 +209,49 @@ ReadProgress readJobProgress(ReadJob* job);
 std::vector<SectorState> readJobMapSummary(ReadJob* job, int buckets);
 void cancelReadJob(ReadJob* job);
 void destroyReadJob(ReadJob* job);
+
+// MARK: - Lossless remux to Matroska
+
+using IntList = std::vector<int>;  // named so Swift can spell the type
+
+struct RemuxRequest {
+    std::string stagingPath;        ///< From ReadResult.
+    std::string outputPath;         ///< .mkv; written to a temp name and renamed on success.
+    Title title;                    ///< From ReadResult.
+    IntList audioTracks;            ///< AudioTrack::number values to keep, in output order.
+    IntList subtitleTracks;         ///< SubtitleTrack::number values to keep, in output order.
+    std::string movieTitle;
+    // Provenance written as Matroska tags.
+    std::string discId;
+    std::string driveModel;
+    uint64_t badSectors = 0;
+    uint64_t unstableSectors = 0;
+};
+
+struct RemuxProgress {
+    double fraction = 0;            ///< Of the staging file consumed.
+};
+
+struct RemuxResult {
+    bool completed = false;
+    bool cancelled = false;
+    std::string error;
+    std::string outputPath;
+    uint64_t durationTicks = 0;     ///< Of the output video track.
+    int timestampDiscontinuities = 0;  ///< Cell boundaries where timestamps were re-based.
+    std::vector<std::string> warnings;
+};
+
+/// Same pattern as ReadJob: `run` blocks; `progress`/`cancel` are thread-safe.
+class RemuxJob;
+
+RemuxJob* createRemuxJob(const RemuxRequest& request);
+RemuxResult runRemuxJob(RemuxJob* job);
+RemuxProgress remuxJobProgress(RemuxJob* job);
+void cancelRemuxJob(RemuxJob* job);
+void destroyRemuxJob(RemuxJob* job);
+
+/// "en" → "eng" (ISO 639-2/B, as Matroska expects); "und" if unknown.
+std::string matroskaLanguage(const std::string& iso639_1);
 
 } // namespace dc

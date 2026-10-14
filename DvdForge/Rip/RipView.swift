@@ -32,13 +32,16 @@ private struct TitleRipView: View {
                 ProgressView(value: entry.progress.passFraction)
                 Text(detailLine).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             }
+            if case let .remuxing(fraction) = entry.status {
+                ProgressView(value: fraction)
+            }
             if !entry.map.isEmpty {
                 SectorMapView(cells: entry.map)
                     .frame(height: 72)
                 MapLegend(progress: entry.progress)
             }
-            if case let .finished(result) = entry.status {
-                ResultSummary(result: result)
+            if case let .finished(read, remux) = entry.status {
+                ResultSummary(result: read, remux: remux)
             }
         }
     }
@@ -49,11 +52,13 @@ private struct TitleRipView: View {
             Text("Queued").foregroundStyle(.secondary)
         case .reading:
             Text(passName).foregroundStyle(.secondary)
-        case let .finished(result):
-            if result.bad == 0 && result.unstable == 0 {
-                Label("Read cleanly", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .remuxing:
+            Text("Writing MKV…").foregroundStyle(.secondary)
+        case let .finished(read, _):
+            if read.bad == 0 && read.unstable == 0 {
+                Label("Archived", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
             } else {
-                Label("Read with damage", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Label("Archived with damage", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             }
         case let .failed(message):
             Label(message, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
@@ -146,6 +151,7 @@ private struct MapLegend: View {
 
 private struct ResultSummary: View {
     let result: TitleReadResult
+    let remux: TitleRemuxResult
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -157,11 +163,15 @@ private struct ResultSummary: View {
                         .font(.callout.monospacedDigit())
                 }
             }
-            if let url = result.stagingURL {
-                Button("Show Staging File in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
+            ForEach(remux.warnings, id: \.self) { warning in
+                Label(warning, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
+            }
+            if let url = remux.outputURL {
+                HStack {
+                    Text(url.lastPathComponent).font(.callout.monospaced()).textSelection(.enabled)
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                        .buttonStyle(.link)
                 }
-                .buttonStyle(.link)
             }
         }
     }

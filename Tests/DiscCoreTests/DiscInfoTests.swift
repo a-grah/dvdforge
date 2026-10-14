@@ -17,11 +17,11 @@ import Testing
         #expect(info.ok, "\(String(info.error)) — run Scripts/make-fixture.sh")
         #expect(String(info.volumeLabel) == "DVDFORGE_FIXTURE")
         #expect(String(info.discId).count == 32)
-        #expect(info.titles.count == 2)
+        #expect(info.titles.count == 3)
     }
 
     @Test func mainTitleStructure() throws {
-        try #require(info.titles.count == 2)
+        try #require(info.titles.count == 3)
         let t = info.titles[0]
         #expect(t.number == 1 && t.titleSet == 1)
         #expect(t.isMainFeature && !t.duplicatesEarlierTitle)
@@ -45,7 +45,7 @@ import Testing
     }
 
     @Test func lpcmTitle() throws {
-        try #require(info.titles.count == 2)
+        try #require(info.titles.count == 3)
         let t = info.titles[1]
         #expect(t.titleSet == 2 && !t.isMainFeature)
         #expect(t.aspect == .fourByThree)
@@ -55,6 +55,14 @@ import Testing
         #expect(t.audio[0].codec == .lpcm && t.audio[0].streamId == 0xA0)
         #expect(t.audio[0].bitsPerSample == 16 && String(t.audio[0].language) == "fr")
         #expect(t.subtitles.isEmpty)
+    }
+
+    @Test func twoCellTitle() throws {
+        try #require(info.titles.count == 3)
+        let t = info.titles[2]
+        #expect(t.titleSet == 2 && !t.isMainFeature && !t.duplicatesEarlierTitle)
+        #expect(t.cells.count == 2 && t.chapters.count == 2)
+        #expect(abs(seconds(t.durationTicks) - 12) < 0.5)
     }
 
     @Test func reportsUnopenablePath() {

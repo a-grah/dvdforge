@@ -7,6 +7,8 @@
 #   Title 1 (VTS 1, 16:9 NTSC) 24 s, chapters at 0/8/16 s,
 #           audio: AC3 2ch eng (0x80), AC3 2ch fra (0x81), subtitles: eng (0x20)
 #   Title 2 (VTS 2, 4:3 NTSC)   6 s, 1 chapter, audio: LPCM 2ch fra (0xA0)
+#   Title 3 (VTS 2)            12 s, two cells from separately encoded VOBs, so
+#           the MPEG clock restarts at the second cell (an STC discontinuity)
 #
 # Usage: Scripts/make-fixture.sh [--force]
 set -euo pipefail
@@ -77,6 +79,10 @@ cat > dvd.xml <<'EOF'
       <video format="ntsc" aspect="4:3"/>
       <audio lang="fr"/>
       <pgc>
+        <vob file="t2.vob"/>
+      </pgc>
+      <pgc>
+        <vob file="t2.vob"/>
         <vob file="t2.vob"/>
       </pgc>
     </titles>

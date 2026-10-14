@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Builds the vendored native dependencies (libdvdcss, libdvdread, a minimal FFmpeg)
+# Builds the vendored native dependencies (libdvdcss, libdvdread, a minimal FFmpeg;
+# the mpegvideo demuxer is required because mpegps identifies DVD video by probing)
 # as static libraries for arm64 + x86_64, merges them into one universal static
 # library and wraps it as Vendor/build/DiscDeps.xcframework.
 #
@@ -77,11 +78,12 @@ build_ffmpeg() {  # $1 = arch, $2 = prefix
     --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
     --disable-x86asm \
     --disable-everything \
-    --enable-demuxer=mpegps \
+    --enable-demuxer=mpegps,mpegvideo \
     --enable-muxer=matroska \
     --enable-parser=mpegvideo,ac3,dca,mlp,mpegaudio,dvdsub \
     --enable-decoder=dvdsub,pcm_dvd \
     --enable-encoder=flac \
+    --enable-bsf=extract_extradata \
     --enable-protocol=file)
   make -C "$bdir" -j$JOBS install
 }
