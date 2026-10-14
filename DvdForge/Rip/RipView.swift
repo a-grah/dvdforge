@@ -44,6 +44,9 @@ private struct TitleRipView: View {
                             .help("Finish now. Sectors still unread are left blank (a brief glitch in the video) and listed in the report; everything already read is kept.")
                     }
                 }
+                if let current = entry.progress.current, entry.progress.pass != .sweep || current.seconds >= 1 {
+                    NowReading(current: current)
+                }
             }
             if case let .remuxing(fraction) = entry.status {
                 ProgressView(value: fraction)
@@ -52,6 +55,13 @@ private struct TitleRipView: View {
                 SectorMapView(cells: entry.map)
                     .frame(height: 72)
                 MapLegend(progress: entry.progress)
+            }
+            if let range = entry.closeUpRange, !entry.closeUp.isEmpty {
+                DamageCloseUp(cells: entry.closeUp, range: range, progress: entry.progress,
+                              isReading: { if case .reading = entry.status { true } else { false } }())
+            }
+            if !entry.events.isEmpty {
+                ActivityLog(events: entry.events)
             }
             if case let .finished(read, remux) = entry.status {
                 ResultSummary(result: read, remux: remux)
@@ -204,5 +214,101 @@ private struct ResultSummary: View {
         if result.bad > 0 { parts.append("\(result.bad) unreadable (zero-filled)") }
         if result.unstable > 0 { parts.append("\(result.unstable) unstable") }
         return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - Live detail while the reader works on damage
+
+/// What the drive is doing this moment, and why it may take a while.
+private struct NowReading: View {
+    let current: ReadSnapshot.CurrentRead
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            let last = current.sector + UInt64(current.count) - 1
+            let sectors = current.count == 1 ? "sector \(current.sector.formatted())"
+                : "sectors \(current.sector.formatted())–\(last.formatted())"
+            Label("Reading \(sectors) · chapter \(current.chapter) at \(current.position.dvdFormatted)"
+                  + (current.seconds >= 1 ? " · drive working for \(Duration.seconds(current.seconds).dvdFormatted)" : ""),
+                  systemImage: current.seconds >= 10 ? "hourglass" : "opticaldisc")
+                .font(.callout.monospacedDigit())
+            if current.seconds >= 10 {
+                Text("The drive is retrying this spot internally, which can take several minutes on a scratch. It has already been marked, so nothing is lost if the drive gives up or resets; dvdForge carries on as soon as the drive answers. If the drive stays stuck, unplugging it and plugging it back in ends the wait and the rip resumes by itself.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+/// The damaged part of the title, zoomed in, with the read position marked.
+private struct DamageCloseUp: View {
+    let cells: [MapCell]
+    let range: Range<UInt64>
+    let progress: ReadSnapshot
+    let isReading: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Damaged area close-up").font(.callout.bold())
+            Canvas { context, size in
+                let w = size.width / CGFloat(cells.count)
+                for (i, cell) in cells.enumerated() {
+                    context.fill(Path(CGRect(x: CGFloat(i) * w, y: 0, width: max(w, 1), height: size.height)),
+                                 with: .color(cell.color))
+                }
+                if isReading, let current = progress.current, range.contains(current.sector) {
+                    let x = CGFloat(current.sector - range.lowerBound) / CGFloat(range.count) * size.width
+                    context.fill(Path(CGRect(x: x - 1.5, y: -2, width: 3, height: size.height + 4)), with: .color(.primary))
+                }
+            }
+            .frame(height: 22)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .accessibilityLabel("Close-up of the damaged area")
+            Text(caption).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+
+    private var caption: String {
+        var parts = ["Sectors \(range.lowerBound.formatted())–\((range.upperBound - 1).formatted())"]
+        if progress.pending > 0 { parts.append("\(progress.pending.formatted()) still to retry") }
+        if progress.bad > 0 { parts.append("\(progress.bad.formatted()) unreadable") }
+        if progress.unstable > 0 { parts.append("\(progress.unstable.formatted()) unstable") }
+        if isReading, progress.current != nil { parts.append("▮ = drive position") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// What the reader did and why, newest at the bottom.
+private struct ActivityLog: View {
+    let events: [RipEvent]
+    @State private var expanded = true
+
+    var body: some View {
+        DisclosureGroup("Activity (\(events.count))", isExpanded: $expanded) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(events.suffix(200)) { event in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(event.date.formatted(date: .omitted, time: .standard))
+                                    .foregroundStyle(.secondary)
+                                Text(event.message)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .font(.caption.monospacedDigit())
+                            .id(event.id)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                }
+                .frame(maxHeight: 140)
+                .onChange(of: events.count) { proxy.scrollTo(events.last?.id, anchor: .bottom) }
+                .onAppear { proxy.scrollTo(events.last?.id, anchor: .bottom) }
+            }
+        }
+        .font(.callout)
     }
 }

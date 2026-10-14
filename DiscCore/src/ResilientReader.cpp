@@ -138,6 +138,20 @@ struct Extent {
     int chapter;
 };
 
+/// "12 sectors" or "10.7 MB", for the activity log.
+std::string sectors(uint64_t n) {
+    char buf[64];
+    if (n * kSectorSize >= 1 << 20) snprintf(buf, sizeof buf, "%.1f MB", n * double(kSectorSize) / (1 << 20));
+    else snprintf(buf, sizeof buf, "%llu sector%s", (unsigned long long)n, n == 1 ? "" : "s");
+    return buf;
+}
+
+std::string minutesSeconds(double s) {
+    char buf[32];
+    snprintf(buf, sizeof buf, "%d:%02d", int(s) / 60, int(s) % 60);
+    return buf;
+}
+
 std::string twoDigits(int n) {
     char buf[8];
     snprintf(buf, sizeof buf, "%02d", n);
@@ -171,15 +185,60 @@ public:
         p.bad = map_.count(SectorState::bad);
         p.pending = map_.count(SectorState::pending);
         p.unstable = map_.count(SectorState::unstable);
+        if (inflightStart_ >= 0) {
+            p.currentSector = inflightStart_;
+            p.currentCount = inflightCount_;
+            p.currentSeconds = std::chrono::duration<double>(Clock::now() - inflightSince_).count();
+            const Extent& e = extentFor(uint64_t(inflightStart_));
+            p.currentChapter = e.chapter;
+            p.currentTicks = ticksAt(e, uint64_t(inflightStart_));
+        }
+        // The span only moves when sectors enter or leave a damaged state, so key
+        // the (full-map) rescan on the damaged count, not on every change.
+        uint64_t damaged = p.bad + p.pending + p.unstable;
+        if (damaged != spanVersion_) {
+            spanVersion_ = damaged;
+            spanFirst_ = spanEnd_ = 0;
+            for (uint64_t i = 0; i < map_.size(); ++i) {
+                SectorState st = map_[i];
+                if (st == SectorState::good || st == SectorState::untried) continue;
+                if (spanEnd_ == 0) spanFirst_ = i;
+                spanEnd_ = i + 1;
+            }
+        }
+        p.damageFirst = spanFirst_;
+        p.damageEnd = spanEnd_;
         return p;
+    }
+
+    std::vector<SectorState> range(uint64_t first, uint64_t end, int buckets) {
+        std::lock_guard lock(mutex_);
+        return summarize(first, std::min<uint64_t>(end, map_.size()), buckets);
+    }
+
+    std::vector<ReadEvent> events(size_t from) {
+        std::lock_guard lock(mutex_);
+        if (from >= events_.size()) return {};
+        return {events_.begin() + static_cast<long>(from), events_.end()};
     }
 
     std::vector<SectorState> summary(int buckets) {
         std::lock_guard lock(mutex_);
         // The UI asks several times a second; rescan only when the map changed.
         if (buckets == summaryBuckets_ && map_.version() == summaryVersion_) return summary_;
+        std::vector<SectorState> out = summarize(0, map_.size(), buckets);
+        summary_ = out;
+        summaryBuckets_ = buckets;
+        summaryVersion_ = map_.version();
+        return out;
+    }
+
+private:
+    /// Worst state per bucket over [first, end); caller holds mutex_.
+    std::vector<SectorState> summarize(uint64_t first0, uint64_t end, int buckets) const {
         std::vector<SectorState> out;
-        if (buckets <= 0 || map_.size() == 0) return out;
+        if (buckets <= 0 || end <= first0) return out;
+        uint64_t span = end - first0;
         out.reserve(buckets);
         // Severity order for "worst state in bucket".
         auto rank = [](SectorState s) {
@@ -193,21 +252,22 @@ public:
             return 0;
         };
         for (int b = 0; b < buckets; ++b) {
-            uint64_t first = map_.size() * b / buckets;
-            uint64_t last = std::max(first + 1, map_.size() * (b + 1) / buckets);
-            SectorState worst = map_[first];
-            for (uint64_t i = first; i < last && i < map_.size(); ++i)
+            uint64_t first = first0 + span * b / buckets;
+            uint64_t last = std::max(first + 1, first0 + span * (b + 1) / buckets);
+            SectorState worst = map_[std::min(first, end - 1)];
+            for (uint64_t i = first; i < last && i < end; ++i)
                 if (rank(map_[i]) > rank(worst)) worst = map_[i];
             out.push_back(worst);
         }
-        summary_ = out;
-        summaryBuckets_ = buckets;
-        summaryVersion_ = map_.version();
         return out;
     }
 
+public:
+
     void cancel() { cancelled_ = true; }
-    void stopRetrying() { stopRetrying_ = true; }
+    void stopRetrying() {
+        if (!stopRetrying_.exchange(true)) log("Stopping retries as asked; what is still unread will be left blank.");
+    }
 
 private:
     // Setup
@@ -235,6 +295,10 @@ private:
     void saveMapIfDue(bool force = false);
     bool isCancelled() const { return cancelled_; }
     std::vector<DamagedRange> damage() const;
+    uint64_t ticksAt(const Extent& e, uint64_t titleSector) const;
+    std::string where(uint64_t titleSector) const;  // "chapter 7 at 27:14"
+    void log(std::string message);  // takes mutex_
+    void logLocked(std::string message);  // caller holds mutex_
 
     std::string discPath_;
     int titleNumber_;
@@ -253,6 +317,9 @@ private:
     std::mutex mutex_;  // guards map_ and progress_ against progress()/summary()
     SectorMap map_;
     ReadProgress progress_;
+    std::vector<ReadEvent> events_;
+    Clock::time_point started_ = Clock::now();
+    uint64_t spanVersion_ = UINT64_MAX, spanFirst_ = 0, spanEnd_ = 0;
     std::vector<SectorState> summary_;  // cached summary(), see summaryVersion_
     int summaryBuckets_ = 0;
     uint64_t summaryVersion_ = UINT64_MAX;
@@ -389,6 +456,7 @@ void ReadJob::sweep() {
                 // small. The more damage already found here, the further the jump.
                 if (damaged && pos < end) {
                     cleanSince = 0;
+                    log("Resuming after damage found earlier in " + where(pos) + "; skipping ahead before reading.");
                     uint64_t floor = std::min<uint64_t>(maxSkip, std::max<uint64_t>(options_.chunkSectors, damaged * 2));
                     skip = skip ? std::min(std::max(skip * 2, floor), maxSkip) : floor;
                     uint64_t jumpEnd = std::min(end, pos + skip);
@@ -411,6 +479,8 @@ void ReadJob::sweep() {
                 // Jump past the damage; what we jump over is read later, from its edges.
                 skip = skip ? std::min(skip * 2, maxSkip) : options_.chunkSectors;
                 uint64_t jumpEnd = std::min(end, j + skip);
+                log("Read error in " + where(pos) + " (sector " + std::to_string(pos) + "); skipping ahead " +
+                    sectors(jumpEnd - j) + ", to come back to it later.");
                 markPending(j, jumpEnd);
                 advance(jumpEnd - j);
                 j = jumpEnd;
@@ -439,6 +509,8 @@ void ReadJob::trim() {
     for (auto [a, b] : runs) total += b - a;
     beginPass(ReadPass::trim, total);
     if (runs.empty()) return;
+    log("First pass done. " + sectors(total) + " in " + std::to_string(runs.size()) + " area" +
+        (runs.size() == 1 ? "" : "s") + " still to read; working inward from the edges of each.");
 
     constexpr uint32_t kBlock = 16;
     std::vector<uint8_t> buf(kBlock * kSectorSize);
@@ -453,6 +525,7 @@ void ReadJob::trim() {
         bool rightKnown = b < map_.size() && map_[b] == SectorState::bad;
         uint64_t lo = a;
         bool edgeFound = leftKnown;
+        uint64_t goodBefore = map_.count(SectorState::good);
         while (lo < b && !edgeFound && !isCancelled()) {
             auto n = static_cast<uint32_t>(std::min<uint64_t>(kBlock, b - lo));
             if (readAndStore(lo, n, buf.data())) { lo += n; continue; }
@@ -469,6 +542,11 @@ void ReadJob::trim() {
             for (uint64_t blockStart = hi - n; hi > blockStart && !isCancelled(); --hi)
                 if (!readAndStore(hi - 1, 1, buf.data())) { edgeFound = true; break; }
         }
+        uint64_t recovered = map_.count(SectorState::good) - goodBefore;
+        uint64_t core = 0;
+        for (uint64_t i = a; i < b; ++i) core += map_[i] == SectorState::pending;
+        log("Area in " + where(a) + ": recovered " + sectors(recovered) + " from its edges; " +
+            (core ? sectors(core) + " in the middle still unread." : "nothing left unread."));
         advance(b - a);
         saveMapIfDue();
     }
@@ -489,6 +567,9 @@ void ReadJob::scrape() {
         }
     }
     beginPass(ReadPass::scrape, groups.size() * options_.retries);
+    if (!groups.empty())
+        log("Retrying " + std::to_string(groups.size()) + " damaged block" + (groups.size() == 1 ? "" : "s") +
+            " (16 sectors each) at low drive speed.");
 
     std::vector<uint8_t> buf(kBlock * kSectorSize);
     source_->setSlow(true);
@@ -514,6 +595,10 @@ void ReadJob::scrape() {
         std::erase_if(left, [&](auto g) { return map_[g.first] != SectorState::pending; });
         if (round % 2 == 1) std::reverse(left.begin(), left.end());
         bool recoveredAny = left.size() < groups.size();
+        if (!isCancelled() && !stopRetrying_)
+            log("Retry round " + std::to_string(round + 1) + ": recovered " +
+                std::to_string(groups.size() - left.size()) + " of " + std::to_string(groups.size()) + " blocks." +
+                (recoveredAny || left.empty() ? "" : " Nothing more is coming off; stopping."));
         groups = std::move(left);
         if (!recoveredAny) break;  // the drive can't read these; more rounds won't help
     }
@@ -539,6 +624,7 @@ void ReadJob::giveUpOnCore(uint64_t first, uint32_t n) {
     uint64_t a = first, b = first + n;
     while (a > 0 && map_[a - 1] == SectorState::pending) --a;
     while (b < map_.size() && map_[b] == SectorState::pending) ++b;
+    log("The drive hangs on the damage in " + where(a) + "; giving up on its " + sectors(b - a) + ".");
     setState(a, b - a, SectorState::bad);
     saveMapIfDue(/*force=*/true);
 }
@@ -553,6 +639,10 @@ void ReadJob::watchdog() {
         // Stuck: assume damage, and make sure a resume after a drive reset skips it.
         inflightFlagged_ = true;
         ++slowReads_;
+        bool sweeping = progress_.pass == ReadPass::sweep;
+        logLocked("The drive is stuck on " + where(uint64_t(inflightStart_)) + " (sector " +
+                  std::to_string(inflightStart_) + "), retrying internally. " +
+                  (sweeping ? "Marked to come back to later." : "Marked unreadable so a resume skips it."));
         for (uint64_t i = inflightStart_; i < uint64_t(inflightStart_) + inflightCount_; ++i) {
             if (map_[i] == SectorState::untried) map_.set(i, SectorState::pending);
             else if (map_[i] == SectorState::pending) map_.set(i, SectorState::bad);
@@ -664,7 +754,13 @@ bool ReadJob::readSectors(uint64_t titleSector, uint32_t count, uint8_t* buf) {
         inflightStart_ = -1;
         lastReadWasSlow_ = inflightFlagged_;
     }
+    if (lastReadWasSlow_) {
+        log(std::string("The drive answered after ") +
+            minutesSeconds(std::chrono::duration<double>(Clock::now() - start).count()) +
+            (ok ? ": read succeeded." : ": read failed."));
+    }
     if (!ok && source_->deviceGone()) {
+        log("The drive disappeared (reset or unplugged). Everything read so far is kept.");
         // The drive itself went away; failures from here on mean nothing. Stop
         // (keeping everything read so far) and let the app resume when it's back.
         deviceLost_ = true;
@@ -734,6 +830,31 @@ void ReadJob::saveMapIfDue(bool force) {
     map_.save(mapPath_, titleNumber_);
 }
 
+uint64_t ReadJob::ticksAt(const Extent& e, uint64_t titleSector) const {
+    // Linear interpolation within the cell; good to about a second.
+    return e.startTicks + (e.count ? e.durationTicks * (titleSector - e.titleStart) / e.count : 0);
+}
+
+std::string ReadJob::where(uint64_t titleSector) const {
+    const Extent& e = extentFor(titleSector);
+    uint64_t secs = ticksAt(e, titleSector) / kTicksPerSecond;
+    char buf[64];
+    if (secs >= 3600)
+        snprintf(buf, sizeof buf, "chapter %d at %llu:%02llu:%02llu", e.chapter, secs / 3600, secs / 60 % 60, secs % 60);
+    else
+        snprintf(buf, sizeof buf, "chapter %d at %llu:%02llu", e.chapter, secs / 60, secs % 60);
+    return buf;
+}
+
+void ReadJob::log(std::string message) {
+    std::lock_guard lock(mutex_);
+    logLocked(std::move(message));
+}
+
+void ReadJob::logLocked(std::string message) {
+    events_.push_back({std::chrono::duration<double>(Clock::now() - started_).count(), std::move(message)});
+}
+
 std::vector<DamagedRange> ReadJob::damage() const {
     std::vector<DamagedRange> out;
     for (uint64_t i = 0; i < map_.size();) {
@@ -742,8 +863,7 @@ std::vector<DamagedRange> ReadJob::damage() const {
         uint64_t j = i;
         while (j < map_.size() && map_[j] == s) ++j;
         const Extent& e = extentFor(i);
-        // Linear interpolation within the cell; good to about a second.
-        uint64_t ticks = e.startTicks + (e.count ? e.durationTicks * (i - e.titleStart) / e.count : 0);
+        uint64_t ticks = ticksAt(e, i);
         out.push_back({.firstSector = i, .sectorCount = j - i, .state = s, .startTicks = ticks,
                        .chapter = e.chapter});
         i = j;
@@ -786,6 +906,10 @@ ReadResult ReadJob::run() {
     result.deviceLost = deviceLost_;
     result.stoppedRetrying = stopRetrying_ && !result.cancelled;
     result.slowReads = slowReads_;
+    {
+        std::lock_guard lock(mutex_);
+        result.events = events_;
+    }
     return result;
 }
 
@@ -804,6 +928,10 @@ ReadJob* createReadJobWithFaults(const std::string& discPath, int titleNumber, c
 ReadResult runReadJob(ReadJob* job) { return job->run(); }
 ReadProgress readJobProgress(ReadJob* job) { return job->progress(); }
 std::vector<SectorState> readJobMapSummary(ReadJob* job, int buckets) { return job->summary(buckets); }
+std::vector<SectorState> readJobMapRange(ReadJob* job, uint64_t first, uint64_t end, int buckets) {
+    return job->range(first, end, buckets);
+}
+std::vector<ReadEvent> readJobEvents(ReadJob* job, size_t from) { return job->events(from); }
 void cancelReadJob(ReadJob* job) { job->cancel(); }
 void stopRetryingReadJob(ReadJob* job) { job->stopRetrying(); }
 void destroyReadJob(ReadJob* job) { delete job; }

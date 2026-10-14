@@ -43,6 +43,8 @@ struct RipReport: Codable, Sendable, Hashable, Identifiable {
         var unstableSectors: UInt64
         var repairedSectors: UInt64
         var damage: [DamageRecord]
+        /// The reader's activity log ("+mm:ss  message"); absent in older reports.
+        var log: [String]?
     }
 
     struct OutputRecord: Codable, Sendable, Hashable {
@@ -141,7 +143,8 @@ extension RipReport {
                 damage: read.damage.map {
                     DamageRecord(chapter: $0.chapter, startSeconds: $0.start.seconds, sectors: $0.sectorCount,
                                  unstable: $0.isUnstable)
-                }),
+                },
+                log: read.log.isEmpty ? nil : read.log),
             output: OutputRecord(
                 file: mkv.lastPathComponent, bytes: bytes,
                 audioTracks: title.audio.filter { selection?.audio.contains($0.number) ?? true }.map(\.description),

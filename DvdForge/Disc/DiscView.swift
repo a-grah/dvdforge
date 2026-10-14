@@ -8,26 +8,35 @@ struct DiscView: View {
     @State private var showWarnings = false
 
     var body: some View {
-        VSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                Divider()
-                titleTable
-            }
-            .frame(minHeight: 200)
-
-            Group {
-                if let rip = model.rip {
+        Group {
+            if let rip = model.rip {
+                // While ripping, titles can't be changed; give the panel the room.
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                    Divider()
                     RipView(session: rip)
-                } else if let title = disc.titles.first(where: { $0.id == focusedTitle }) {
-                    TitleDetailView(title: title)
-                } else {
-                    Text("Select a title to see its chapters and tracks.")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                VSplitView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        Divider()
+                        titleTable
+                    }
+                    .frame(minHeight: 200)
+
+                    Group {
+                        if let title = disc.titles.first(where: { $0.id == focusedTitle }) {
+                            TitleDetailView(title: title)
+                        } else {
+                            Text("Select a title to see its chapters and tracks.")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
+                    .frame(minHeight: 160)
                 }
             }
-            .frame(minHeight: 160)
         }
         .onAppear { focusedTitle = disc.mainFeature?.id ?? disc.titles.first?.id }
         .sheet(isPresented: Bindable(model).isChoosingMovie) {

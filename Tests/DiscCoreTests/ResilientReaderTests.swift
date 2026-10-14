@@ -147,6 +147,10 @@ import Testing
         var expected = reference
         expected.replaceSubrange(1000 * 2048 ..< 4000 * 2048, with: Data(count: 3000 * 2048))
         #expect(data == expected, "everything outside the scratch is recovered, nothing inside is invented")
+        let log = result.events.map { String($0.message) }
+        #expect(log.contains { $0.hasPrefix("Read error in chapter") }, "log: \(log)")
+        #expect(log.contains { $0.hasPrefix("First pass done.") })
+        #expect(log.contains { $0.contains("recovered") && $0.contains("from its edges") })
     }
 
     @Test func stuckReadIsMarkedForLaterWhileStillStuck() async throws {
@@ -168,6 +172,11 @@ import Testing
         try await Task.sleep(for: .milliseconds(700))
         let map = try String(contentsOf: dir.appending(path: "title-01.map"), encoding: .utf8)
         #expect(map.split(separator: "\n").contains { $0.hasSuffix(" 2") }, "map: \(map)")
+        // The UI can see what the drive is stuck on, and for how long.
+        let now = dc.readJobProgress(job)
+        #expect(now.currentSector >= 0 && now.currentSector <= 100 && now.currentSeconds > 0.4)
+        #expect(now.damageEnd > now.damageFirst)
+        #expect(dc.readJobEvents(job, 0).contains { String($0.message).hasPrefix("The drive is stuck on chapter") })
 
         while box.result == nil { try await Task.sleep(for: .milliseconds(50)) }
         let result = try #require(box.result)

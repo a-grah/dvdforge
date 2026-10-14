@@ -75,8 +75,27 @@ struct ReadSnapshot: Sendable {
     var repaired: UInt64 = 0
     var readErrors: UInt64 = 0
     var bytesPerSecond: Double = 0
+    /// The read in flight, if any.
+    var current: CurrentRead?
+    /// Sectors [first, end) spanning all damage found so far.
+    var damageSpan: Range<UInt64>?
+
+    struct CurrentRead: Sendable, Equatable {
+        var sector: UInt64
+        var count: UInt32
+        var seconds: Double
+        var chapter: Int
+        var position: Duration
+    }
 
     var passFraction: Double { passTotal == 0 ? 0 : Double(passDone) / Double(passTotal) }
+}
+
+/// One line of the reader's activity log.
+struct RipEvent: Sendable, Hashable, Identifiable {
+    var id: Int
+    var date: Date
+    var message: String
 }
 
 enum MapCell: UInt8, Sendable { case untried, good, pending, bad, unstable }
@@ -112,6 +131,7 @@ struct TitleReadResult: Sendable {
     var deviceLost: Bool
     var stoppedRetrying: Bool
     var damage: [DamagedRange]
+    var log: [String]
 }
 
 /// Moves a job pointer to the queue that destroys it.
@@ -129,7 +149,21 @@ final class ReadJobHandle: @unchecked Sendable {
         var options = dc.ReadOptions()
         options.verify = verify.core
         options.retries = Int32(retries)
-        job = dc.createReadJob(std.string(discPath), Int32(title), std.string(stagingDir.path), options)
+        // Development aid: `-simulateDamage 1000-4000@300` makes title sectors
+        // 1000..<4000 (VTS-relative) unreadable, each failure taking 300 ms, to
+        // exercise the damage UI without a scratched disc.
+        if let spec = UserDefaults.standard.string(forKey: "simulateDamage"),
+           let match = spec.wholeMatch(of: /(\d+)-(\d+)(?:@(\d+))?/),
+           let first = UInt32(match.1), let end = UInt32(match.2), first < end {
+            var faults = dc.FaultPlan()
+            for s in first ..< end { faults.hardBad.push_back(s) }
+            faults.failureDelayMs = Int32(match.3.flatMap { Int($0) } ?? 0)
+            options.slowReadSeconds = 0.25
+            job = dc.createReadJobWithFaults(std.string(discPath), Int32(title), std.string(stagingDir.path),
+                                             options, faults)
+        } else {
+            job = dc.createReadJob(std.string(discPath), Int32(title), std.string(stagingDir.path), options)
+        }
     }
 
     deinit {
@@ -159,6 +193,15 @@ final class ReadJobHandle: @unchecked Sendable {
 
     func map(buckets: Int) -> [MapCell] {
         dc.readJobMapSummary(job, Int32(buckets)).map { MapCell(rawValue: $0.rawValue) ?? .untried }
+    }
+
+    func map(_ range: Range<UInt64>, buckets: Int) -> [MapCell] {
+        dc.readJobMapRange(job, range.lowerBound, range.upperBound, Int32(buckets))
+            .map { MapCell(rawValue: $0.rawValue) ?? .untried }
+    }
+
+    func events(from index: Int) -> [(seconds: Double, message: String)] {
+        dc.readJobEvents(job, index).map { ($0.seconds, String($0.message)) }
     }
 }
 
@@ -241,6 +284,11 @@ final class RipSession {
         var status: TitleStatus = .queued
         var progress = ReadSnapshot()
         var map: [MapCell] = []
+        /// Zoomed map around the damage, and the sectors it covers.
+        var closeUp: [MapCell] = []
+        var closeUpRange: Range<UInt64>?
+        var events: [RipEvent] = []
+        var started = Date()
         var reportError: String?
         var id: Int { title.number }
     }
@@ -338,6 +386,8 @@ final class RipSession {
                                 stagingDir: stagingDir, verify: plan.verify, retries: plan.retries)
         currentRead = job
         entries[index].status = .reading
+        entries[index].started = Date()
+        entries[index].events = []
         let poller = Task { [weak self] in
             while !Task.isCancelled {
                 self?.refresh(index, from: job)
@@ -387,9 +437,25 @@ final class RipSession {
         if (try? fm.contentsOfDirectory(atPath: folder.path))?.isEmpty == true { try? fm.removeItem(at: folder) }
     }
 
+    static let closeUpBuckets = 300
+
     private func refresh(_ index: Int, from job: ReadJobHandle) {
-        entries[index].progress = job.progress()
+        let progress = job.progress()
+        entries[index].progress = progress
         entries[index].map = job.map(buckets: Self.mapBuckets)
+        if let span = progress.damageSpan {
+            // A margin either side so the edges of the damage are visible.
+            let margin = max(256, UInt64(span.count) / 3)
+            let window = span.lowerBound.saturatingSubtract(margin) ..< min(progress.totalSectors, span.upperBound + margin)
+            entries[index].closeUpRange = window
+            entries[index].closeUp = job.map(window, buckets: Self.closeUpBuckets)
+        }
+        let start = entries[index].started
+        let new = job.events(from: entries[index].events.count)
+        for event in new {
+            entries[index].events.append(RipEvent(id: entries[index].events.count,
+                                                  date: start.addingTimeInterval(event.seconds), message: event.message))
+        }
     }
 }
 
@@ -415,6 +481,12 @@ extension ReadSnapshot {
         repaired = p.repaired
         readErrors = p.readErrors
         bytesPerSecond = p.bytesPerSecond
+        if p.currentSector >= 0 {
+            current = CurrentRead(sector: UInt64(p.currentSector), count: p.currentCount, seconds: p.currentSeconds,
+                                  chapter: Int(p.currentChapter),
+                                  position: .nanoseconds(Int64(p.currentTicks) * 100_000 / 9))
+        }
+        if p.damageEnd > p.damageFirst { damageSpan = p.damageFirst ..< p.damageEnd }
     }
 }
 
@@ -436,6 +508,7 @@ extension TitleReadResult {
         resumed = r.resumed
         deviceLost = r.deviceLost
         stoppedRetrying = r.stoppedRetrying
+        log = r.events.map { String(format: "+%@  %@", Duration.seconds($0.seconds).dvdFormatted, String($0.message)) }
         damage = r.damage.map {
             DamagedRange(firstSector: $0.firstSector, sectorCount: $0.sectorCount,
                          isUnstable: $0.state == .unstable,
@@ -459,4 +532,8 @@ extension String {
             .map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
             .joined(separator: " ")
     }
+}
+
+extension UInt64 {
+    func saturatingSubtract(_ other: UInt64) -> UInt64 { self > other ? self - other : 0 }
 }

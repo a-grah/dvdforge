@@ -109,6 +109,15 @@ private struct ReportDetail: View {
                 ForEach(report.output.warnings, id: \.self) { warning in
                     Label(warning, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
                 }
+                if let log = report.read.log, !log.isEmpty {
+                    DisclosureGroup("Activity log (\(log.count))") {
+                        Text(log.joined(separator: "\n"))
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.callout)
+                }
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)

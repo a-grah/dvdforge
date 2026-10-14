@@ -168,6 +168,24 @@ struct ReadProgress {
     uint64_t repaired = 0;          ///< Sectors corrected by the verification pass.
     uint64_t readErrors = 0;        ///< Failed read calls so far (all passes).
     double bytesPerSecond = 0;      ///< Recent read throughput.
+
+    // The read in flight right now (currentSector < 0 when none).
+    int64_t currentSector = -1;     ///< Title-relative.
+    uint32_t currentCount = 0;
+    double currentSeconds = 0;      ///< How long the drive has been working on it.
+    int currentChapter = 0;
+    uint64_t currentTicks = 0;      ///< Approximate playback position.
+
+    // The span of the title that contains all damage found so far
+    // (pending, bad or unstable sectors); damageEnd == 0 when none.
+    uint64_t damageFirst = 0;
+    uint64_t damageEnd = 0;
+};
+
+/// Something the reader did or decided, for the activity log.
+struct ReadEvent {
+    double seconds = 0;             ///< Since the job started.
+    std::string message;
 };
 
 /// A run of unreadable or unstable sectors, located in the title's timeline.
@@ -197,6 +215,7 @@ struct ReadResult {
     bool stoppedRetrying = false;   ///< The user chose to finish before retries were exhausted.
     uint64_t slowReads = 0;         ///< Reads that tripped the stuck-read watchdog.
     std::vector<DamagedRange> damage;
+    std::vector<ReadEvent> events;  ///< The activity log.
     Title title;                    ///< The title's structure, as read from this disc (for remuxing).
 };
 
@@ -230,6 +249,10 @@ ReadProgress readJobProgress(ReadJob* job);
 /// The sector map squeezed into `buckets` cells, each the worst state inside it,
 /// for drawing.
 std::vector<SectorState> readJobMapSummary(ReadJob* job, int buckets);
+/// The same for sectors [first, end) only: a close-up of a damaged area.
+std::vector<SectorState> readJobMapRange(ReadJob* job, uint64_t first, uint64_t end, int buckets);
+/// Activity-log entries from index `from` on (pass the count you already have).
+std::vector<ReadEvent> readJobEvents(ReadJob* job, size_t from);
 void cancelReadJob(ReadJob* job);
 /// Finish now: no more retries; whatever is still unread is zero-filled and
 /// reported as damage, and the title goes on to be remuxed.
