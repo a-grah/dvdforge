@@ -43,7 +43,11 @@ import Testing
 
     static func tool(_ name: String, _ args: [String]) throws -> (out: Data, err: String) {
         let p = Process()
-        p.executableURL = URL(filePath: "/opt/homebrew/bin/\(name)")
+        // Homebrew lives in /opt/homebrew on Apple Silicon, /usr/local on Intel.
+        let dir = ["/opt/homebrew/bin", "/usr/local/bin"].first {
+            FileManager.default.isExecutableFile(atPath: "\($0)/\(name)")
+        } ?? "/opt/homebrew/bin"
+        p.executableURL = URL(filePath: "\(dir)/\(name)")
         p.arguments = args
         let out = Pipe(), err = Pipe()
         p.standardOutput = out

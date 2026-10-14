@@ -22,7 +22,7 @@ struct SettingsView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Stepper("Retries per damaged sector: \(retries)", value: $retries, in: 1 ... 64)
+                Stepper("Retry rounds for damaged areas: \(retries)", value: $retries, in: 1 ... 64)
             } header: {
                 Text("Reading")
             }
