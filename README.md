@@ -53,6 +53,12 @@ Made by [bluepill.ca](https://bluepill.ca).
 - A DVD drive (USB is fine; see [Drive tips](#drive-tips))
 - To build: Xcode 27 (what it's developed with) and [Homebrew](https://brew.sh)
 
+## Download
+
+Signed and notarised builds are on the
+[Releases](https://github.com/a-grah/dvdforge/releases) page: unzip and drag
+`dvdForge.app` to Applications.
+
 ## Building
 
 ```sh
@@ -70,6 +76,19 @@ time and is skipped afterwards; `Scripts/build-deps.sh --force` rebuilds it.
 
 The app isn't sandboxed (raw access to the drive requires that) and is signed
 ad hoc for local use.
+
+### Making a release
+
+`Scripts/release.sh` builds, signs with your Developer ID (hardened runtime),
+notarises, staples and zips the app into `dist/`. It needs a
+*Developer ID Application* certificate and a notarytool profile:
+
+```sh
+xcrun notarytool store-credentials dvdforge-notary --apple-id <you@example.com> --team-id <TEAMID>
+Scripts/release.sh
+```
+
+`DVDFORGE_SIGN_IDENTITY` and `DVDFORGE_NOTARY_PROFILE` override the defaults.
 
 ### Tests
 
