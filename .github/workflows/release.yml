@@ -1,5 +1,7 @@
 # Pushing a tag like v1.1 builds, signs, notarises and publishes a release.
 # The tag must match MARKETING_VERSION in project.yml.
+# Running it by hand (Actions → Release → Run workflow) is a dry run: it builds,
+# signs and notarises, and uploads the zip as a workflow artifact instead.
 #
 # Repository secrets:
 #   DEVELOPER_ID_P12           base64 of the "Developer ID Application" certificate
@@ -13,6 +15,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -29,9 +32,10 @@ jobs:
       - name: Check the tag matches the version
         run: |
           version=$(sed -n 's/^ *MARKETING_VERSION: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' project.yml | head -1)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || exit 0
           [[ "$GITHUB_REF_NAME" == "v$version" ]] || {
             echo "::error::tag $GITHUB_REF_NAME doesn't match MARKETING_VERSION $version"; exit 1; }
-          echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Install tools
         run: brew install xcodegen meson ninja pkg-config
@@ -72,7 +76,15 @@ jobs:
           echo "$NOTARY_KEY" | base64 --decode > "$DVDFORGE_NOTARY_KEY"
           Scripts/release.sh
 
+      - name: Keep the dry-run build
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dvdForge-${{ env.VERSION }}-dry-run
+          path: dist/
+
       - name: Publish
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
