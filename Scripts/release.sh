@@ -49,6 +49,14 @@ xcodebuild -project dvdForge.xcodeproj -scheme dvdForge -configuration Release \
 lipo -info "$APP/Contents/MacOS/dvdForge"
 
 echo "==> Signing (hardened runtime, secure timestamp)"
+# Sparkle's helpers first, inside out, as Sparkle's documentation describes.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+sign() { codesign --force --options runtime --timestamp --sign "$IDENTITY" "$@"; }
+sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+sign --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+sign "$SPARKLE/Versions/B/Autoupdate"
+sign "$SPARKLE/Versions/B/Updater.app"
+sign "$SPARKLE"
 codesign --force --options runtime --timestamp \
   --entitlements DvdForge/DvdForge.entitlements \
   --sign "$IDENTITY" "$APP"

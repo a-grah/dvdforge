@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct DvdForgeApp: App {
     @State private var model = AppModel()
+    @State private var updater = Updater.shared
 
     var body: some Scene {
         Window("dvdForge", id: "main") {
@@ -13,6 +14,8 @@ struct DvdForgeApp: App {
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About dvdForge") { AboutPanel.show() }
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
             }
             CommandGroup(replacing: .newItem) {
                 Button("Open Disc Image or Folder…") { model.isImporting = true }

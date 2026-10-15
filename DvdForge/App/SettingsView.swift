@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.autoRip) private var autoRip = false
     @AppStorage(SettingsKey.ejectWhenDone) private var ejectWhenDone = false
     @State private var choosingFolder = false
+    @State private var updater = Updater.shared
 
     var body: some View {
         Form {
@@ -70,6 +71,14 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Text("Output")
+            }
+            Section {
+                Toggle("Check for updates automatically", isOn: $updater.checksAutomatically)
+                    .disabled(!updater.isAvailable)
+                Button("Check Now") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            } header: {
+                Text("Updates")
             }
         }
         .formStyle(.grouped)

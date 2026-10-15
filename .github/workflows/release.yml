@@ -10,6 +10,8 @@
 #   NOTARY_KEY                 base64 of an App Store Connect API key (.p8)
 #   NOTARY_KEY_ID              that key's ID
 #   NOTARY_ISSUER_ID           the issuer ID shown above the key list
+#   SPARKLE_ED_KEY             the Sparkle update-signing private key, from
+#                              Sparkle's `generate_keys --account dvdforge -x <file>`
 name: Release
 
 on:
@@ -76,6 +78,41 @@ jobs:
           echo "$NOTARY_KEY" | base64 --decode > "$DVDFORGE_NOTARY_KEY"
           Scripts/release.sh
 
+      - name: Sign the update and write the appcast
+        env:
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
+          SPARKLE_VERSION: 2.10.0
+          SPARKLE_SHA256: c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+        run: |
+          tools="$RUNNER_TEMP/sparkle"
+          mkdir -p "$tools"
+          curl -sSL -o "$tools/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
+          echo "$SPARKLE_SHA256  $tools/sparkle.tar.xz" | shasum -a 256 -c
+          tar -xf "$tools/sparkle.tar.xz" -C "$tools"
+          zip="dist/dvdForge-$VERSION.zip"
+          signature=$(echo "$SPARKLE_ED_KEY" | "$tools/bin/sign_update" --ed-key-file - "$zip")
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          cat > dist/appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>dvdForge</title>
+              <link>$repo</link>
+              <item>
+                <title>dvdForge $VERSION</title>
+                <pubDate>$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+                <sparkle:version>$VERSION</sparkle:version>
+                <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+                <sparkle:fullReleaseNotesLink>$repo/releases/tag/v$VERSION</sparkle:fullReleaseNotesLink>
+                <enclosure url="$repo/releases/download/v$VERSION/dvdForge-$VERSION.zip" type="application/octet-stream" $signature />
+              </item>
+            </channel>
+          </rss>
+          XML
+          cat dist/appcast.xml
+
       - name: Keep the dry-run build
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v7
@@ -89,7 +126,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            "dist/dvdForge-$VERSION.zip" "dist/dvdForge-$VERSION.zip.sha256" \
+            "dist/dvdForge-$VERSION.zip" "dist/dvdForge-$VERSION.zip.sha256" dist/appcast.xml \
             --title "dvdForge $VERSION" --generate-notes
 
       - name: Clean up

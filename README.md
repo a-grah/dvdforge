@@ -57,7 +57,8 @@ Made by [bluepill.ca](https://bluepill.ca).
 
 Signed and notarised builds are on the
 [Releases](https://github.com/a-grah/dvdforge/releases) page: unzip and drag
-`dvdForge.app` to Applications.
+`dvdForge.app` to Applications. From 1.1 on, the app updates itself
+(**dvdForge → Check for Updates…**, or automatically if you allow it).
 
 ## Building
 
@@ -90,16 +91,23 @@ Scripts/release.sh
 
 `DVDFORGE_SIGN_IDENTITY` and `DVDFORGE_NOTARY_PROFILE` override the defaults.
 
-GitHub Actions does the same on a tag. Bump `MARKETING_VERSION` (and
-`CURRENT_PROJECT_VERSION`) in `project.yml`, commit, then:
+GitHub Actions does the same on a tag, and also signs the zip for
+[Sparkle](https://sparkle-project.org) and attaches the `appcast.xml` the app
+checks for updates (always read from the latest release). Bump
+`MARKETING_VERSION` in `project.yml`, commit, then:
 
 ```sh
 git tag v1.1 && git push origin main v1.1
 ```
 
 `.github/workflows/release.yml` builds, signs, notarises and publishes the
-release. It needs the secrets listed at the top of that file. `ci.yml` builds
+release. It needs the secrets listed at the top of that file. Running it by
+hand from the Actions tab is a dry run that publishes nothing. `ci.yml` builds
 and runs the tests on every push and pull request.
+
+Publish releases through the workflow rather than by hand, so each one carries
+its appcast. Forks need their own Sparkle key: change `SUPublicEDKey` and
+`SUFeedURL` in `project.yml`.
 
 ### Tests
 
@@ -202,4 +210,5 @@ version. See [LICENSE](LICENSE).
 It includes [libdvdcss](https://www.videolan.org/developers/libdvdcss.html)
 and [libdvdread](https://www.videolan.org/developers/libdvdnav.html) (GPL-2.0
 or later) and [FFmpeg](https://ffmpeg.org) (built as LGPL-2.1 or later), each
-under its own license in `Vendor/src/`.
+under its own license in `Vendor/src/`, and uses
+[Sparkle](https://sparkle-project.org) (MIT) for updates.

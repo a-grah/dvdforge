@@ -8,6 +8,11 @@ options:
   # target runs, so build it (once; later runs are instant) while generating.
   preGenCommand: Scripts/build-deps.sh
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -53,12 +58,16 @@ targets:
       - sdk: IOKit.framework
       - sdk: DiskArbitration.framework
       - sdk: CoreFoundation.framework
+      - package: Sparkle
     info:
       path: DvdForge/Info.plist
       properties:
         CFBundleDisplayName: dvdForge
         LSApplicationCategoryType: public.app-category.utilities
         NSHumanReadableCopyright: "© 2026 bluepill.ca"
+        # Updates: release.yml attaches appcast.xml to every GitHub release.
+        SUFeedURL: https://github.com/a-grah/dvdforge/releases/latest/download/appcast.xml
+        SUPublicEDKey: 1/LsPYv8uqd9rknr7+dpVtmjyWgUW74c+jD1Uvc8F1Q=
     entitlements:
       path: DvdForge/DvdForge.entitlements
       properties:
@@ -70,7 +79,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: ca.bluepill.dvdforge
         MARKETING_VERSION: "1.0"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        CURRENT_PROJECT_VERSION: "1"
+        # Sparkle compares build versions, so keep them equal to the version.
+        CURRENT_PROJECT_VERSION: "$(MARKETING_VERSION)"
         SWIFT_OBJC_INTEROP_MODE: objcxx
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/DiscCore/include"
         ENABLE_HARDENED_RUNTIME: YES

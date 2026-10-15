@@ -24,5 +24,9 @@
 	<string>public.app-category.utilities</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 bluepill.ca</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/a-grah/dvdforge/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>1/LsPYv8uqd9rknr7+dpVtmjyWgUW74c+jD1Uvc8F1Q=</string>
 </dict>
 </plist>
