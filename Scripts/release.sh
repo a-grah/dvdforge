@@ -16,7 +16,9 @@
 #   DVDFORGE_NOTARY_KEY_ID   its key ID and
 #   DVDFORGE_NOTARY_ISSUER   issuer ID, used instead of the profile (as in CI)
 #
-# Output: dist/dvdForge-<version>.zip containing the stapled app, plus its SHA-256.
+# Output: dist/dvdForge-<version>.dmg (signed, notarised, stapled; holds the stapled
+# app and an Applications link on a styled background), plus its SHA-256.
+# Needs create-dmg (brew install create-dmg).
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
@@ -36,7 +38,8 @@ VERSION=$(sed -n 's/^ *MARKETING_VERSION: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' proj
 BUILD_DIR="$ROOT/build/release"
 APP="$BUILD_DIR/Build/Products/Release/dvdForge.app"
 DIST="$ROOT/dist"
-ZIP="$DIST/dvdForge-$VERSION.zip"
+ZIP="$BUILD_DIR/dvdForge-notarise.zip"
+DMG="$DIST/dvdForge-$VERSION.dmg"
 
 echo "==> dvdForge $VERSION, signing as: $IDENTITY"
 
@@ -62,19 +65,41 @@ codesign --force --options runtime --timestamp \
   --sign "$IDENTITY" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 
-echo "==> Notarising (this usually takes a few minutes)"
+echo "==> Notarising the app (this usually takes a few minutes)"
 mkdir -p "$DIST"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
+rm -f "$ZIP"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 
 echo "==> Checking as Gatekeeper will"
 spctl --assess --type execute --verbose=4 "$APP"
 
-echo "==> Packaging"
-rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
-shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
-echo "==> Done: $ZIP"
+echo "==> Building the disk image"
+# Window layout matches Scripts/dmg-background.tiff (Scripts/make-dmg-background.swift).
+STAGE="$BUILD_DIR/dmg"
+rm -rf "$STAGE" "$DMG"
+mkdir -p "$STAGE"
+ditto "$APP" "$STAGE/dvdForge.app"
+create-dmg \
+  --volname "dvdForge $VERSION" \
+  --background Scripts/dmg-background.tiff \
+  --window-pos 200 120 \
+  --window-size 660 400 \
+  --icon-size 128 \
+  --icon dvdForge.app 165 190 \
+  --hide-extension dvdForge.app \
+  --app-drop-link 495 190 \
+  "$DMG" "$STAGE/" >/dev/null
+rm -rf "$STAGE"
+
+echo "==> Signing and notarising the disk image"
+codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+xcrun notarytool submit "$DMG" "${NOTARY_AUTH[@]}" --wait
+xcrun stapler staple "$DMG"
+spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+
+shasum -a 256 "$DMG" | tee "$DMG.sha256"
+echo "==> Done: $DMG"

@@ -56,8 +56,8 @@ Made by [bluepill.ca](https://bluepill.ca).
 ## Download
 
 Signed and notarised builds are on the
-[Releases](https://github.com/a-grah/dvdforge/releases) page: unzip and drag
-`dvdForge.app` to Applications. From 1.1 on, the app updates itself
+[Releases](https://github.com/a-grah/dvdforge/releases) page: open the DMG and
+drag dvdForge to Applications. From 1.1 on, the app updates itself
 (**dvdForge → Check for Updates…**, or automatically if you allow it).
 
 ## Building
@@ -81,8 +81,10 @@ ad hoc for local use.
 ### Making a release
 
 `Scripts/release.sh` builds, signs with your Developer ID (hardened runtime),
-notarises, staples and zips the app into `dist/`. It needs a
-*Developer ID Application* certificate and a notarytool profile:
+notarises and staples the app, then packages it as a notarised DMG in `dist/`
+(window background from `Scripts/make-dmg-background.swift`). It needs
+`brew install create-dmg`, a *Developer ID Application* certificate and a
+notarytool profile:
 
 ```sh
 xcrun notarytool store-credentials dvdforge-notary --apple-id <you@example.com> --team-id <TEAMID>
@@ -91,7 +93,7 @@ Scripts/release.sh
 
 `DVDFORGE_SIGN_IDENTITY` and `DVDFORGE_NOTARY_PROFILE` override the defaults.
 
-GitHub Actions does the same on a tag, and also signs the zip for
+GitHub Actions does the same on a tag, and also signs the DMG for
 [Sparkle](https://sparkle-project.org) and attaches the `appcast.xml` the app
 checks for updates (always read from the latest release). Bump
 `MARKETING_VERSION` in `project.yml`, commit, then:

@@ -1,7 +1,7 @@
 # Pushing a tag like v1.1 builds, signs, notarises and publishes a release.
 # The tag must match MARKETING_VERSION in project.yml.
 # Running it by hand (Actions → Release → Run workflow) is a dry run: it builds,
-# signs and notarises, and uploads the zip as a workflow artifact instead.
+# signs and notarises, and uploads the DMG as a workflow artifact instead.
 #
 # Repository secrets:
 #   DEVELOPER_ID_P12           base64 of the "Developer ID Application" certificate
@@ -40,7 +40,7 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME doesn't match MARKETING_VERSION $version"; exit 1; }
 
       - name: Install tools
-        run: brew install xcodegen meson ninja pkg-config
+        run: brew install xcodegen meson ninja pkg-config create-dmg
 
       - name: Dependency cache key
         id: deps
@@ -90,8 +90,8 @@ jobs:
             "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_VERSION/Sparkle-$SPARKLE_VERSION.tar.xz"
           echo "$SPARKLE_SHA256  $tools/sparkle.tar.xz" | shasum -a 256 -c
           tar -xf "$tools/sparkle.tar.xz" -C "$tools"
-          zip="dist/dvdForge-$VERSION.zip"
-          signature=$(echo "$SPARKLE_ED_KEY" | "$tools/bin/sign_update" --ed-key-file - "$zip")
+          dmg="dist/dvdForge-$VERSION.dmg"
+          signature=$(echo "$SPARKLE_ED_KEY" | "$tools/bin/sign_update" --ed-key-file - "$dmg")
           repo="https://github.com/$GITHUB_REPOSITORY"
           cat > dist/appcast.xml <<XML
           <?xml version="1.0" encoding="utf-8"?>
@@ -106,7 +106,7 @@ jobs:
                 <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
                 <sparkle:fullReleaseNotesLink>$repo/releases/tag/v$VERSION</sparkle:fullReleaseNotesLink>
-                <enclosure url="$repo/releases/download/v$VERSION/dvdForge-$VERSION.zip" type="application/octet-stream" $signature />
+                <enclosure url="$repo/releases/download/v$VERSION/dvdForge-$VERSION.dmg" type="application/octet-stream" $signature />
               </item>
             </channel>
           </rss>
@@ -126,7 +126,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            "dist/dvdForge-$VERSION.zip" "dist/dvdForge-$VERSION.zip.sha256" dist/appcast.xml \
+            "dist/dvdForge-$VERSION.dmg" "dist/dvdForge-$VERSION.dmg.sha256" dist/appcast.xml \
             --title "dvdForge $VERSION" --generate-notes
 
       - name: Clean up
